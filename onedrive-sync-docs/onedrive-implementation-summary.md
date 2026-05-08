@@ -4,26 +4,32 @@
 
 ### 1.1 OneDrive 在同步框架中的位置
 
-Super Productivity 的同步系统分两层：
+Super Productivity 的同步系统分两层，通过适配器模式桥接：
 
 ```
-┌──────────────────────────────────────────────────┐
-│                 SyncWrapperService                │  ← 统一入口，触发同步
-├──────────────────────────────────────────────────┤
-│  Operation Sync (SuperSync)  │  File Sync (网盘)  │
-│  provider.supportsOpSync=true │  FileSyncProvider  │
-│  实时差量同步                  │  sync-data.json    │
-├──────────────────────────────┼──────────────────┤
-│        SuperSync Server       │  Dropbox/WebDAV  │
-│                               │  Nextcloud       │
-│                               │  OneDrive ← NEW  │
-└──────────────────────────────┴──────────────────┘
+┌────────────────────────────────────────────────────────┐
+│                   SyncWrapperService                    │  ← 统一入口
+├────────────────────────────────────────────────────────┤
+│           SyncTriggerService                           │  ← 多源触发
+│  (鼠标/空闲/Electron/在线/可见性/定时器)                 │
+├────────────────────────────────────────────────────────┤
+│              WrappedProviderService                     │  ← 适配桥接
+│  ┌──────────────────────────────────────────────────┐  │
+│  │  OperationSyncCapable  ←  统一操作同步接口        │  │
+│  │  ├─ SuperSync (原生)                              │  │
+│  │  └─ FileBasedSyncAdapterService  ← 适配层        │  │
+│  │       ├─ FileSyncProvider (Dropbox/WebDAV)        │  │
+│  │       ├─ FileSyncProvider (Nextcloud)             │  │
+│  │       ├─ FileSyncProvider (LocalFile)             │  │
+│  │       └─ FileSyncProvider (OneDrive) ← NEW        │  │
+│  └──────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────┘
 ```
 
-OneDrive 实现了 `FileSyncProvider` 接口（5 个方法），被分类为 `FILE_BASED_PROVIDER_IDS` 成员，天然继承所有现有基础设施：
+`OneDrive` 类实现了 `FileSyncProvider` 接口（5 个方法，其中 `listFiles` 为可选），被 `FileBasedSyncAdapterService.createAdapter()` 包装为 `OperationSyncCapable`，从而参与统一的 op-log 同步系统。作为 `FILE_BASED_PROVIDER_IDS` 成员，天然继承所有现有基础设施：
 
-- 操作捕获 → Operation Capture Meta-Reducer
-- 冲突解决 → LWW + 向量时钟比较
+- 操作捕获 → Operation Capture Meta-Reducer (16 个 meta-reducer, 8 阶段)
+- 冲突解决 → LWW + 向量时钟比较（entity-level）
 - 加密 → AES-GCM 对称加密（可选）
 - 备份/恢复 → 自动备份到本地
 
@@ -34,8 +40,10 @@ src/app/
 ├── op-log/
 │   ├── sync-providers/
 │   │   ├── file-based/
+│   │   │   ├── file-based-sync-adapter.service.ts  (1017 行) 适配层核心
+│   │   │   ├── file-based-sync.types.ts             FileBasedSyncData 类型
 │   │   │   └── onedrive/
-│   │   │       ├── onedrive.ts          (668 行) ★ 核心
+│   │   │       ├── onedrive.ts          (668 行) ★ 核心 (class OneDrive)
 │   │   │       ├── onedrive.model.ts     (29 行)  类型
 │   │   │       └── onedrive.spec.ts      (260 行) 测试
 │   │   ├── provider.const.ts            +OneDrive 枚举
@@ -63,6 +71,21 @@ src/app/
 
 ### 2.1 同步完整流程
 
+**触发机制** (SyncTriggerService) 多源 merge，经过 debounce(100ms) + auditTime(syncInterval):
+
+| 触发源          | 事件                                            | 说明                                                          |
+| --------------- | ----------------------------------------------- | ------------------------------------------------------------- |
+| 鼠标/触摸       | `mousemove` after idle / `touchstart` / `focus` | 用户恢复活动（鼠标 idle 后 1min 节流，触摸/focus 15min 节流） |
+| 空闲            | `isIdle$` → true                                | 用户离开时触发一次                                            |
+| Electron 恢复   | `ipcResume$`                                    | 从睡眠唤醒                                                    |
+| Electron 休眠前 | `ipcSuspend$`                                   | 睡前最后一次同步                                              |
+| 恢复在线        | `isOnline$` → true                              | 网络恢复                                                      |
+| 页面隐藏        | `visibilitychange` → hidden                     | 切标签页/关闭前                                               |
+| 定时器          | `timer(syncInterval)`                           | 仅 file-based provider，检测外部文件变更                      |
+| Android         | `onResume$`, `onPause$`, 后台定时器             | 移动端专用                                                    |
+
+**同步执行流程** (SyncWrapperService.\_sync()):
+
 ```
 用户操作 (创建/更新/删除任务)
     │
@@ -70,42 +93,77 @@ src/app/
 NgRx Action dispatch
     │
     ▼
-Operation Capture Meta-Reducer  ← 拦截所有 action，生成 Operation
+Operation Capture Meta-Reducer (16 个 meta-reducer, 8 阶段)
     │
     ▼
-OperationLogService.appendToLog()  → 写入 IndexedDB (clientId + vectorClock)
+OperationLogService.appendToLog() → 写入 IndexedDB (clientId + vectorClock)
     │
     ▼
-SyncTriggerService 轮询 / 手动触发
+SyncTriggerService (多源触发，见上表) / 手动触发
     │
     ▼
-FileSyncService.sync()
-    ├── ① downloadFile("sync-data.json")  → 获取远程状态
-    ├── ② 比较 syncVersion (乐观锁)
-    ├── ③ ConflictResolutionService      → LWW 冲突解决
-    ├── ④ OperationApplierService         → 应用远程变更
-    └── ⑤ uploadFile("sync-data.json")    → 上传合并后状态
+SyncWrapperService.sync() → _sync()
+    ├── WrappedProviderService.getOperationSyncCapable(provider)
+    │   └── FileBasedSyncAdapterService.createAdapter(OneDrive, ...)
+    │       → 返回 OperationSyncCapable (支持 downloadOps / uploadOps)
+    │
+    ├── ① OperationLogSyncService.downloadRemoteOps()
+    │   └── adapter.downloadOps(sinceSeq, ...)
+    │       └── _downloadOps() → provider.downloadFile("sync-data.json")
+    │           → 解析 → 缓存 → gap检测 → 过滤已应用 ops → 应用远程变更
+    │
+    ├── ② OperationLogSyncService.uploadPendingOps()
+    │   └── adapter.uploadOps(localOps, ...)
+    │       └── _uploadOps() → 构建合并数据 → provider.uploadFile(...)
+    │           └── _uploadWithMismatchFallback()
+    │               ├── rev 不匹配 → 重新下载
+    │               ├── rev 变化 → 合并后重试 (最多 2 次)
+    │               └── rev 未变 → 强制覆盖上传
+    │
+    └── ③ LWW 重上传 (最多 3 次)
+        └── 本地胜出的 LWW 操作 → uploadPendingOps() → 循环直到无剩余
               │
               ▼
          Microsoft Graph API
-    PUT /me/drive/special/approot:/Super Productivity/sync-data.json
+    PUT /me/drive/special/approot:/Super Productivity/sync-data.json:/content
+    Headers: If-Match: "expected-etag"
 ```
 
 ### 2.2 sync-data.json 结构
 
+参考 `FileBasedSyncData` 接口 (`file-based-sync.types.ts`):
+
+```typescript
+interface FileBasedSyncData {
+  version: 2; // 文件格式版本号 (字面量 2)
+  syncVersion: number; // 基于内容的乐观锁计数器
+  schemaVersion: number; // 应用数据 schema 版本
+  vectorClock: VectorClock; // 所有操作后的因果时钟
+  lastModified: number; // 最后成功同步时间戳 (epoch ms)
+  clientId: string; // 最后修改此文件的客户端 ID
+  state: unknown; // 完整应用状态快照 (AppDataComplete)
+  archiveYoung?: ArchiveModel; // ≤21 天归档 (数据仍可能修改)
+  archiveOld?: ArchiveModel; // >21 天归档 (惰性数据)
+  recentOps: SyncFileCompactOp[]; // 最近 500 条压缩操作 (用于冲突检测)
+  oldestOpSyncVersion?: number; // recentOps 中最老操作的 sv，用于 partial-trimming gap 检测
+}
+```
+
+实际 JSON 示例:
+
 ```json
 {
-  "version": "1.0",
+  "version": 2,
   "syncVersion": 42,
   "schemaVersion": 2,
   "vectorClock": { "client-a": 15, "client-b": 8 },
   "lastModified": 1701700000000,
   "clientId": "uuid-client-a",
   "state": {
-    /* 完整 NgRx State */
+    /* 完整 NgRx State - AppDataComplete */
   },
   "recentOps": [
-    /* 最近 500 条 Operation */
+    /* 最近 500 条 SyncFileCompactOp (CompactOperation & { sv?: number }) */
   ],
   "archiveYoung": {
     /* 归档任务 */
@@ -113,11 +171,11 @@ FileSyncService.sync()
   "archiveOld": {
     /* 老归档 */
   },
-  "oldestOpSyncVersion": 0
+  "oldestOpSyncVersion": 35
 }
 ```
 
-`syncVersion` 实现乐观锁 —— 每次上传前检查远程是否更新，防止并发覆盖。
+`syncVersion` 实现基于内容的乐观锁 —— 每次上传前检查远程计数器是否匹配预期值，不依赖服务端 ETag。同时利用 provider 的 ETag/rev 做传输层辅助校验（`If-Match` 头），双重保护防止并发覆盖。
 
 ---
 
@@ -180,7 +238,7 @@ FileSyncService.sync()
 
 - 每次发起授权生成随机 `state` 值（`crypto.randomUUID()`）
 - 回调时验证 state 匹配，防止 CSRF
-- 过期 state 定时清理（`_pruneExpiredOAuthStates()`），不再用 setInterval 轮询
+- 过期 state 按需清理（`_pruneExpiredOAuthStates()` 在添加/验证 state 时触发，不再用 setInterval 轮询）
 
 ---
 
@@ -223,15 +281,15 @@ async _refreshAccessTokenIfNeeded(): Promise<void> {
 
 ### 5.1 FileSyncProvider 接口
 
-| 方法                          | OneDrive 实现                                     |
-| ----------------------------- | ------------------------------------------------- |
-| `getFileRev(path)`            | `GET /drive/...:/path` → 返回 ETag                |
-| `downloadFile(path)`          | `GET /drive/...:/path:/content` → `{ rev, data }` |
-| `uploadFile(path, data, rev)` | `PUT /drive/...:/path:/content` + `If-Match: rev` |
-| `removeFile(path)`            | `DELETE /drive/...:/path`                         |
-| `listFiles(path)`             | `GET /drive/.../children`                         |
+| 方法           | 签名                                                   | OneDrive 实现                                                    |
+| -------------- | ------------------------------------------------------ | ---------------------------------------------------------------- |
+| `getFileRev`   | `(targetPath, localRev)`                               | `GET /drive/...:/path` → 返回 ETag                               |
+| `downloadFile` | `(targetPath)` → `{ rev, dataStr }`                    | `GET /drive/...:/path:/content` → 从 Header 取 ETag，Body 取数据 |
+| `uploadFile`   | `(targetPath, dataStr, revToMatch, isForceOverwrite?)` | `PUT /drive/...:/path:/content` + `If-Match: rev`                |
+| `removeFile`   | `(targetPath)`                                         | `DELETE /drive/...:/path`                                        |
+| `listFiles?`   | `(targetPath)` → `string[]`                            | `GET /drive/.../children`（可选方法）                            |
 
-### 5.2 下载优化：单次 API 调用
+### 5.2 下载优化：单次 API 调用 + 同步周期缓存
 
 ```
 GET /me/drive/special/approot:/Super Productivity/sync-data.json
@@ -240,18 +298,27 @@ Headers: Accept: application/json
 ← Headers: ETag: "abc123"
 ← Body: { ... sync-data.json content ... }
 
-一次请求同时拿到 ETag + 数据体，无需先 HEAD 再 GET
-```
+一次请求同时拿到 ETag + 数据体，无需先 HEAD 再 GET。
+
+`FileBasedSyncAdapterService` 在同步周期内缓存下载结果（TTL 30s），避免 `_uploadOps` 和 `_downloadOps` 各下载一次导致重复 API 调用。
 
 ### 5.3 上传冲突保护
 
+双层乐观锁机制：
+1. **内容层**：`FileBasedSyncAdapterService._uploadWithMismatchFallback()` 比较 `syncVersion` 计数器
+2. **传输层**：OneDrive 使用 ETag + `If-Match` 头
+
 ```
+
 PUT /me/drive/special/approot:/Super Productivity/sync-data.json:/content
 Headers: If-Match: "expected-etag"
 
-→ 412 Precondition Failed     ← 远程已被其他设备更新
-   → 重新 downloadFile → 合并 → 重试 (最多 2 次)
-→ 201 Created / 200 OK         ← 成功
+→ 412 Precondition Failed ← 远程已被其他设备更新
+→ 重新 downloadFile → 比较 syncVersion
+├── syncVersion 变了 → 抛出异常，下次同步周期重新合并
+└── syncVersion 未变 → 强制覆盖上传 (isForceOverwrite=true)
+→ 201 Created / 200 OK ← 成功
+
 ```
 
 ### 5.4 同步文件夹
@@ -267,23 +334,25 @@ Headers: If-Match: "expected-etag"
 ### 6.1 OneDrive 设置项
 
 ```
+
 ┌─ Sync Provider ───────────────────────────┐
-│ ○ None  ○ SuperSync  ○ Dropbox            │
-│ ○ WebDAV  ○ LocalFile  ○ Nextcloud        │
-│ ● OneDrive                                 │
+│ ○ None ○ SuperSync ○ Dropbox │
+│ ○ WebDAV ○ LocalFile ○ Nextcloud │
+│ ● OneDrive │
 ├────────────────────────────────────────────┤
-│ [OneDrive 配置]                             │
-│                                            │
-│ □ Use custom Azure AD app                  │
-│   (不勾选则用官方 Client ID，如果可用)      │
-│                                            │
-│ Client ID:   [________________]            │
-│ Client Secret: [________________]          │  ← 仅 custom app
-│                                            │
-│ [Authorize]  按钮 → 启动 OAuth 流程         │
-│                                            │
-│ ⚫ 已授权 / ⚪ 需要授权 / 🔒 已加密         │
+│ [OneDrive 配置] │
+│ │
+│ □ Use custom Azure AD app │
+│ (不勾选则用官方 Client ID，如果可用) │
+│ │
+│ Client ID: [________________] │
+│ Client Secret: [________________] │ ← 仅 custom app
+│ │
+│ [Authorize] 按钮 → 启动 OAuth 流程 │
+│ │
+│ ⚫ 已授权 / ⚪ 需要授权 / 🔒 已加密 │
 └────────────────────────────────────────────┘
+
 ```
 
 ### 6.2 官方 Client ID 机制
@@ -344,11 +413,13 @@ Headers: If-Match: "expected-etag"
 
 ## 9. 设计决策
 
-### 9.1 为什么复用 FileSyncProvider 而非新建接口
+### 9.1 为什么复用 FileSyncProvider 和适配器模式而非新建接口
 
+- `FileBasedSyncAdapterService.createAdapter()` 将任意 `FileSyncProvider` 包装为 `OperationSyncCapable`，使文件存储提供者能参与统一的 op-log 同步系统
 - WebDAV / Dropbox / Nextcloud 已经有成熟的 file-based sync 模式
-- sync-data.json 模式简单可靠，经过多年验证
+- `FileBasedSyncData` (sync-data.json) 模式简单可靠，经过多年验证
 - 避免引入新的同步协议，降低维护成本
+- `WrappedProviderService` 作统一桥接：SuperSync 原生支持 op sync，file-based 通过 adapter 适配
 
 ### 9.2 为什么 PKCE 而非 Client Secret
 
@@ -356,11 +427,12 @@ Headers: If-Match: "expected-etag"
 - PKCE 是 OAuth 2.1 推荐方式
 - Microsoft 要求 SPA/本地应用使用 PKCE
 
-### 9.3 为什么 ETag 而非时间戳做乐观锁
+### 9.3 为什么双重乐观锁（syncVersion + ETag）
 
-- ETag 是 Microsoft 推荐方式
-- 时间戳有精度和时钟偏差问题
-- `If-Match` 头是标准 HTTP 乐观锁机制
+- **内容层**：`syncVersion` 计数器内嵌在 `FileBasedSyncData` 中，不依赖服务端特性，跨所有 file-based provider 统一工作
+- **传输层**：ETag + `If-Match` 头提供即时版本不匹配检测（HTTP 412），避免无效上传消耗带宽
+- 时间戳有精度和时钟偏差问题，不适合做乐观锁
+- 双重机制互补：syncVersion 处理跨 provider 一致性，ETag 处理传输层并发
 
 ---
 
@@ -368,9 +440,8 @@ Headers: If-Match: "expected-etag"
 
 1. **无官方 Client ID**：每个用户需自建 Azure AD 应用
 2. **移动端未测**：iOS/Android WebView 的 OAuth 回调未验证
-3. **Personal Account 限定**：仅支持 `consumers` 端点，不支持组织账户
-4. **单文件同步**：所有数据在 1 个 JSON 文件中，大文件效率低
-5. **无即时推送**：基于轮询的同步，不支持实时变更通知
+3. **单文件同步**：所有数据在 1 个 JSON 文件中，大文件效率低
+4. **无即时推送**：基于多源触发的勤同步（非 WebSocket push），非 file-based provider 场景无定时器轮询
 
 ---
 
@@ -380,3 +451,4 @@ Headers: If-Match: "expected-etag"
 - [Microsoft Identity - PKCE](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)
 - [OAuth 2.1 草案](https://datatracker.ietf.org/doc/draft-ietf-oauth-v2-1/)
 - [Super Productivity Sync Architecture](../docs/sync-and-op-log/)
+```
