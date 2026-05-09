@@ -305,7 +305,7 @@ Headers: Accept: application/json
 ### 5.3 上传冲突保护
 
 双层乐观锁机制：
-1. **内容层**：`FileBasedSyncAdapterService._uploadWithMismatchFallback()` 比较 `syncVersion` 计数器
+1. **内容层**：`FileBasedSyncAdapterService._uploadOps()` 比较 `syncVersion` 计数器（当前值 vs 预期值），`_buildMergedSyncData()` 递增 `syncVersion`
 2. **传输层**：OneDrive 使用 ETag + `If-Match` 头
 
 ```
@@ -314,9 +314,9 @@ PUT /me/drive/special/approot:/Super Productivity/sync-data.json:/content
 Headers: If-Match: "expected-etag"
 
 → 412 Precondition Failed ← 远程已被其他设备更新
-→ 重新 downloadFile → 比较 syncVersion
-├── syncVersion 变了 → 抛出异常，下次同步周期重新合并
-└── syncVersion 未变 → 强制覆盖上传 (isForceOverwrite=true)
+→ 重新 downloadFile → 比较 ETag/rev
+├── ETag 变了 → 真正的并发上传，抛出异常，下次同步周期重新合并
+└── ETag 未变 → 服务端 ETag 时间戳不一致，强制覆盖上传 (isForceOverwrite=true)
 → 201 Created / 200 OK ← 成功
 
 ```
@@ -370,8 +370,8 @@ Headers: If-Match: "expected-etag"
 
 | 错误类型   | HTTP 状态 | 处理策略                         |
 | ---------- | --------- | -------------------------------- |
-| Token 过期 | 401       | 刷新 token 后重试                |
-| 权限不足   | 403       | 抛出 `MissingCredentialsSPError` |
+| Token 过期 | 401       | 清除 credential → 抛出 `AuthFailSPError`，需用户重新授权 |
+| 权限不足   | 403       | 清除 credential（`InvalidAuthenticationToken`）→ 抛出 `AuthFailSPError` |
 | 文件未找到 | 404       | 首次同步，创建新文件             |
 | 版本冲突   | 412       | 重新下载 → 合并 → 重试           |
 | 限流       | 429       | `Retry-After` 头等待后重试       |
