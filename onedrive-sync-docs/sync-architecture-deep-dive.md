@@ -9,7 +9,14 @@
 2. [同步方案选型：为什么选择操作日志？](#2-同步方案选型为什么选择操作日志)
 3. [核心概念：操作日志（Operation Log）](#3-核心概念操作日志operation-log)
 4. [文件同步数据格式](#4-文件同步数据格式)
-5. [同步流程详解](#5-同步流程详解)
+5. [同步流程详解（全流程伪代码）](#5-同步流程详解全流程伪代码)
+   - [5.1 顶层编排：SyncWrapperService.\_sync()](#51-顶层编排syncwrapperservice_sync)
+   - [5.2 下载流程：downloadRemoteOps()](#52-下载流程downloadremoteops)
+   - [5.3 冲突检测与解决管线：processRemoteOps()](#53-冲突检测与解决管线processremoteops)
+   - [5.4 冲突检测：向量时钟比较详解](#54-冲突检测向量时钟比较详解)
+   - [5.5 LWW 自动解决：autoResolveConflictsLWW()](#55-lww-自动解决autoresolveconflictslww)
+   - [5.6 上传流程：uploadPendingOps()](#56-上传流程uploadpendingops)
+   - [5.7 完整同步周期的数据流总结](#57-完整同步周期的数据流总结)
 6. [多客户端并发场景分析](#6-多客户端并发场景分析)
 7. [冲突检测与解决](#7-冲突检测与解决)
 8. [文件同步适配器（共享层）](#8-文件同步适配器共享层)
@@ -229,119 +236,801 @@ interface FileBasedSyncData {
 
 ---
 
-## 5. 同步流程详解
+## 5. 同步流程详解（全流程伪代码）
 
-### 5.1 完整同步周期
+> **阅读指引：** 本章从顶层到细节，逐步追踪一次完整同步的执行路径。
+> 每一段伪代码都标注了关键数据结构的使用点：
+>
+> - ⏱️ = **操作日志**（IndexedDB `SUP_OPS`）被读写
+> - 🕐 = **向量时钟** 被比较、合并或递增
+> - 🔒 = **乐观锁**（syncVersion 或 ETag）被校验
 
-`SyncWrapperService._sync()` 编排了整个同步周期：
+### 5.1 顶层编排：SyncWrapperService.\_sync()
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  SyncWrapperService._sync()                                        │
-│                                                                     │
-│  1. 获取 OperationSyncCapable provider                              │
-│     - SuperSync → 直接用                                            │
-│     - 文件类 → FileBasedSyncAdapterService 包装                     │
-│                                                                     │
-│  2. 检测 Provider 切换 → 强制从 seq 0 重新下载                      │
-│                                                                     │
-│  3. 下载远端操作 downloadRemoteOps()                                │
-│     → OperationLogSyncService                                       │
-│                                                                     │
-│  4. 上传本地待同步操作 uploadPendingOps()                            │
-│     → OperationLogSyncService                                       │
-│                                                                     │
-│  5. LWW 重传循环（如果有本地赢的操作需要重新上传）                    │
-│     - 最多重试 MAX_LWW_REUPLOAD_RETRIES 次                          │
-│                                                                     │
-│  6. 标记 IN_SYNC，如果是 SuperSync 则连接 WebSocket                 │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### 5.2 下载流程（downloadRemoteOps）
+这是每次同步周期的入口，负责编排下载→上传→LWW重传的完整流程。
 
 ```
-OperationLogSyncService.downloadRemoteOps()
-    │
-    ├─ OperationLogDownloadService.downloadRemoteOps()
-    │   └─ provider.downloadOps(sinceSeq, excludeClient)
-    │       │
-    │       │  [文件类] FileBasedSyncAdapterService._downloadOps()
-    │       │   1. 下载 sync-data.json
-    │       │   2. 解密+解压
-    │       │   3. 过滤已应用的操作
-    │       │   4. 检测 gap（版本重置、快照替换、部分裁剪）
-    │       │   5. 返回 ops + snapshotState + vectorClock
-    │       │
-    │       │  [SuperSync] 直接从 API 获取 ops
-    │
-    ├─ 检测 server migration（空服务器上有历史客户端）
-    ├─ 处理 snapshotState（新客户端引导）
-    │   └─ SyncHydrationService.hydrateFromRemoteSync()
-    ├─ 检测 SYNC_IMPORT 冲突 → 弹对话框
-    └─ processRemoteOps()
-        └─ RemoteOpsProcessingService.processRemoteOps()
+SyncWrapperService._sync():
+    // 第 0 步：获取适配后的 provider
+    rawProvider = providerManager.getActiveProvider()   // 当前配置的 provider
+    providerId    = rawProvider.id
+
+    // WrappedProviderService 决定如何获得 OperationSyncCapable：
+    //   SuperSync → 直接返回（原生支持）
+    //   FileSyncProvider → FileBasedSyncAdapterService.createAdapter(provider, ...)
+    //     返回包装对象 { uploadOps, downloadOps, getLastServerSeq, ... }
+    syncProvider = wrappedProvider.getOperationSyncCapable(rawProvider)
+
+    // 检测 provider 切换 → 强制从 seq 0 下载（触发全量状态比较）
+    isProviderSwitch = (lastSyncedProvider !== null && lastSyncedProvider !== providerId)
+
+    // ═══════════════════════════════════════════════════════════════
+    // 第 1 步：下载远端操作  ← 详见 5.2
+    // ═══════════════════════════════════════════════════════════════
+    downloadResult = downloadRemoteOps(syncProvider,
+        isProviderSwitch ? { forceFromSeq0: true } : undefined
+    )
+    if downloadResult.kind === 'cancelled':
+        return 'HANDLED_ERROR'  // 用户在冲突对话框中取消了
+
+    // ═══════════════════════════════════════════════════════════════
+    // 第 2 步：上传本地待同步操作  ← 详见 5.6
+    // ═══════════════════════════════════════════════════════════════
+    uploadResult = uploadPendingOps(syncProvider)
+    if uploadResult.kind === 'cancelled':
+        return 'HANDLED_ERROR'
+
+    // ═══════════════════════════════════════════════════════════════
+    // 第 3 步：LWW 重上传循环
+    // ═══════════════════════════════════════════════════════════════
+    // 如果 LWW 判定本地胜出，ConflictResolutionService 会创建新的
+    // UPDATE 操作（携带当前实体状态 + 合并后的向量时钟）。
+    // 这些新操作需要在此次同步中上传，让其他客户端看到本地状态。
+    pendingLwwOps = downloadResult.localWinOpsCreated + uploadResult.localWinOpsCreated
+    lwwRetries = 0
+    while pendingLwwOps > 0 AND lwwRetries < MAX_LWW_REUPLOAD_RETRIES (3):
+        lwwRetries++
+        reuploadResult = uploadPendingOps(syncProvider)
+        pendingLwwOps = reuploadResult.localWinOpsCreated
+
+    // 第 4 步：标记状态
+    if uploadResult.permanentRejectionCount > 0:
+        setSyncStatus('ERROR')
+    else:
+        setSyncStatus('IN_SYNC')
+        if providerId === SuperSync: connectWebSocket()
 ```
 
-### 5.3 RemoteOpsProcessingService 处理管线
+### 5.2 下载流程：downloadRemoteOps()
 
-这是远程操作处理的核心管线：
+`OperationLogSyncService.downloadRemoteOps()` 负责从远端拉取操作并处理。这是同步流程中
+**最复杂的部分**，因为它必须处理多种场景：新客户端引导、provider 切换、SYNC_IMPORT 冲突、
+以及正常的增量操作下载。
 
-```
-RemoteOpsProcessingService.processRemoteOps(remoteOps)
-    │
-    ├─ Step 1: Schema 迁移
-    │   - 版本太旧（< MIN_SUPPORTED）→ 错误，停止
-    │   - 版本太新（> current + MAX_SKIP）→ 错误，停止
-    │   - 正常范围 → 迁移到当前版本
-    │
-    ├─ Step 2: SYNC_IMPORT 过滤
-    │   - SyncImportFilterService.filterOpsInvalidatedBySyncImport()
-    │   - 丢弃被全量导入覆盖的旧操作
-    │
-    ├─ Step 3: 全量操作检查
-    │   - SYNC_IMPORT / BACKUP_IMPORT → 跳过冲突检测，直接应用
-    │
-    ├─ Step 4: 冲突检测
-    │   - VectorClockService 获取本地实体前沿
-    │   - 对比远程操作与本地待同步操作的向量时钟
-    │
-    ├─ Step 5: 冲突解决
-    │   - 有冲突 → ConflictResolutionService.autoResolveConflictsLWW()
-    │   - 无冲突 → applyNonConflictingOps() 直接应用
-    │
-    └─ Step 6: Checkpoint D 状态验证
-        - ValidateStateService.validateAndRepairCurrentState()
-        - 修复引用完整性（如任务引用已删除的项目）
-```
-
-### 5.4 上传流程（uploadPendingOps）
+#### 5.2.1 文件类 Provider 的下载（FileBasedSyncAdapterService.\_downloadOps）
 
 ```
-OperationLogSyncService.uploadPendingOps()
-    │
-    ├─ writeFlushService.flushPendingWrites()  // 确保所有写入完成
-    ├─ isWhollyFreshClient() → 阻止空客户端上传
-    ├─ serverMigrationService.checkAndHandleMigration()
-    ├─ uploadService.uploadPendingOps(provider)
-    │   └─ provider.uploadOps(ops, clientId)
-    │       │
-    │       │  [文件类] FileBasedSyncAdapterService._uploadOps()
-    │       │   1. 获取当前 sync-data.json
-    │       │   2. 合并新操作到 recentOps
-    │       │   3. 更新向量时钟
-    │       │   4. 读取 NgRx 当前状态作为新快照
-    │       │   5. 加密+压缩
-    │       │   6. 上传（带乐观锁重试）
-    │       │
-    │       │  [SuperSync] 直接调用 API 上传 ops
-    │
-    ├─ 处理 piggybacked ops（上传时服务端返回的其他客户端操作）
-    │   └─ processRemoteOps(piggybackedOps)
-    │
-    └─ 处理被拒绝的 ops（服务端拒绝的操作）
-        └─ RejectedOpsHandlerService.handleRejectedOps()
+FileBasedSyncAdapterService._downloadOps(sinceSeq, excludeClient):
+    // ── 阶段 A：下载 + 解密 ──
+    result   = provider.downloadFile("sync-data.json")   // OneDrive: GET .../content
+    rev      = result.rev                                // ETag
+    rawData  = result.dataStr
+    syncData = 解密解压(rawData)                          // AES-GCM → JSON → FileBasedSyncData
+    //                                ⏱️ 返回的是 sync-data.json 完整内容，
+    //                                   包含 state 快照 + recentOps + vectorClock
+
+    // 🔒 缓存此次下载（TTL 30s），让 _uploadOps 复用，省一次 API 调用
+    setCachedSyncData(providerKey, syncData, rev)
+
+    // ── 阶段 B：Gap 检测（三种情况需要重置 sinceSeq） ──
+    previousVersion = expectedSyncVersions.get(providerKey) ?? 0
+
+    // ① 版本回退：syncVersion 变小 → 另一个客户端上传了快照
+    versionWasReset = (previousVersion > 0 AND syncData.syncVersion < previousVersion)
+
+    // ② 快照替换：我们期望有增量操作 (sinceSeq > 0)，但文件 recentOps 为空
+    //    且 state 存在 → 另一客户端用 "Use Local" 覆盖了文件
+    snapshotReplacement = (
+        sinceSeq > 0 AND
+        syncData.recentOps.length === 0 AND
+        !!syncData.state AND
+        syncData.clientId !== excludeClient   // 不是我们自己上传的
+    )
+
+    // ③ 部分裁剪：recentOps 满了 → 最老 ops 被裁掉
+    //    oldestOpSyncVersion > sinceSeq → 我们漏掉了被裁的操作
+    partialTrimGap = (
+        sinceSeq > 0 AND
+        syncData.oldestOpSyncVersion !== undefined AND
+        syncData.oldestOpSyncVersion > sinceSeq AND
+        syncData.recentOps.length >= 500
+    )
+
+    needsGapDetection = versionWasReset OR snapshotReplacement OR partialTrimGap
+
+    // ── 阶段 C：构建返回的操作列表 ──
+    filteredOps = []
+    for (compactOp, index) in syncData.recentOps:
+        if excludeClient AND compactOp.clientId === excludeClient:
+            continue   // 跳过自己上传的操作
+        filteredOps.push({
+            serverSeq: index + 1,       // 合成序列号（仅用于兼容）
+            op: compactToSyncOp(compactOp),  // SyncFileCompactOp → SyncOperation
+            receivedAt: compactOp.ts
+        })
+
+    // ── 阶段 D：构建快照状态（仅全量下载时） ──
+    snapshotState =
+        if sinceSeq === 0 AND syncData.state:
+            // 将 state + archiveYoung + archiveOld 合并为一个对象
+            // 供 SyncHydrationService 写入 IndexedDB 和 NgRx
+            { ...syncData.state, archiveYoung, archiveOld }
+        else:
+            undefined
+
+    return {
+        ops: filteredOps.slice(0, 500),     // ServerSyncOperation[]
+        latestSeq: syncData.syncVersion,     // 🔒 用 syncVersion 作为序列号
+        snapshotVectorClock: syncData.vectorClock,  // 🕐 快照的向量时钟
+        gapDetected: needsGapDetection,      // 是否需要从 seq 0 重新下载
+        snapshotState: snapshotState         // 全量状态（仅 seq 0 时非空）
+    }
 ```
+
+#### 5.2.2 下载后的处理（OperationLogSyncService）
+
+```
+OperationLogSyncService.downloadRemoteOps(syncProvider):
+    result = downloadService.downloadRemoteOps(syncProvider)
+
+    // ── 情况 1：服务器迁移 ──
+    if result.needsFullStateUpload:
+        // 空服务器 + 有本地数据 → 上传 SYNC_IMPORT 来播种
+        serverMigrationService.handleServerMigration(syncProvider)
+        return { kind: 'server_migration_handled' }
+
+    // ── 情况 2：快照状态（文件类 Provider, seq 0 下载） ──
+    if result.snapshotState:
+        // 🕐 短路优化：比较本地和远程向量时钟
+        localClock  = opLogStore.getVectorClock()          // ⏱️ 从 IndexedDB 读取
+        remoteClock = result.snapshotVectorClock
+
+        if localClock 非空 AND remoteClock 非空:
+            cmp = compareVectorClocks(localClock, remoteClock)
+            // 🕐 compareVectorClocks 算法详见 5.4.1
+            if cmp === 'EQUAL' OR cmp === 'GREATER_THAN':
+                // 本地已经拥有远程的所有数据，跳过水合
+                // （避免丢弃本地独有的操作）
+                return { kind: 'no_new_ops' }
+
+        // 检测本地是否有未同步的修改
+        unsyncedOps = opLogStore.getUnsynced()             // ⏱️ 查询 IndexedDB
+        if unsyncedOps.length > 0:
+            // 🔥 冲突对话框："本地有数据，远端也有数据，选哪个？"
+            throw LocalDataConflictError(...)
+
+        // 新客户端 → 确认对话框
+        if isFreshClient AND hasStoreData:
+            throw LocalDataConflictError(...)
+        if isFreshClient:
+            if NOT confirmDialog("远端有数据，是否下载？"):
+                return { kind: 'cancelled' }
+
+        // ✅ 水合：写入 NgRx Store + IndexedDB
+        syncHydrationService.hydrateFromRemoteSync(
+            result.snapshotState,
+            result.snapshotVectorClock,
+            createSyncImport=false   // 文件类不创建 SYNC_IMPORT
+        )
+        // ⏱️ 将 recentOps 写入 IndexedDB（防止下次同步重复应用）
+        opLogStore.appendBatchSkipDuplicates(result.newOps)
+        return { kind: 'snapshot_hydrated' }
+
+    // ── 情况 3：无新操作 ──
+    if result.newOps.length === 0:
+        return { kind: 'no_new_ops' }
+
+    // ── 情况 4：有增量操作 → 进入处理管线 ──
+    // 先检测是否收到 SYNC_IMPORT（全量导入操作）
+    incomingFullStateOp = result.newOps.find(op => FULL_STATE_OP_TYPES.has(op.opType))
+    if incomingFullStateOp:
+        pendingOps = opLogStore.getUnsynced()              // ⏱️
+        if hasMeaningfulPendingOps(pendingOps):
+            // 🔥 冲突对话框
+            resolution = showSyncImportConflictDialog()
+            if resolution === 'CANCEL': return { kind: 'cancelled' }
+            // USE_LOCAL 或 USE_REMOTE 已执行
+        // 否则静默接受（pending 中没有有意义的用户数据）
+
+    // ✅ 核心：处理远程操作  ← 详见 5.3
+    processResult = remoteOpsProcessingService.processRemoteOps(result.newOps)
+
+    // 更新 lastServerSeq（防止下次重复下载）
+    syncProvider.setLastServerSeq(result.latestSeq)
+    return { kind: 'ops_processed', localWinOpsCreated: processResult.localWinOpsCreated }
+```
+
+### 5.3 冲突检测与解决管线：processRemoteOps()
+
+这是整个同步系统的心脏——对每一个远程操作，判断它是新的、过时的、还是冲突的。
+
+```
+RemoteOpsProcessingService.processRemoteOps(remoteOps):
+    // ═══════════════════════════════════════════════════════════════
+    // Step 1: Schema 迁移
+    // ═══════════════════════════════════════════════════════════════
+    for each op in remoteOps:
+        if op.schemaVersion < MIN_SUPPORTED:
+            throw Error("版本太旧")        // 停止同步
+        if op.schemaVersion > currentVersion + MAX_SKIP:
+            updateRequired = true; break    // 需要更新 app
+        migratedOps.push( schemaMigrationService.migrate(op) )
+
+    // ═══════════════════════════════════════════════════════════════
+    // Step 2: SYNC_IMPORT 过滤
+    // ═══════════════════════════════════════════════════════════════
+    // 如果本地有未同步的 SYNC_IMPORT，需要判断远程操作是否被它"覆盖"
+    filterResult = syncImportFilterService.filterOpsInvalidatedBySyncImport(migratedOps)
+    // 🕐 这里对比操作携带的向量时钟 vs 本地 SYNC_IMPORT 操作的时间
+    //    被覆盖的 ops 向量时钟 ≤ SYNC_IMPORT 的时钟 → CONCURRENT 或 LESS_THAN
+    //    → 丢弃（SYNC_IMPORT 已经包含了这些操作的最终效果）
+    // 详见 5.4.2 的向量时钟比较规则
+
+    if filterResult.allOpsFiltered:
+        return { allOpsFilteredBySyncImport: true, filteredOpCount: ... }
+
+    opsToProcess = filterResult.remainingOps
+
+    // ═══════════════════════════════════════════════════════════════
+    // Step 3: 全量操作（SYNC_IMPORT / BACKUP_IMPORT）→ 直接应用
+    // ═══════════════════════════════════════════════════════════════
+    fullStateOps  = opsToProcess.filter(op => FULL_STATE_OP_TYPES.has(op.opType))
+    regularOps    = opsToProcess.filter(op => NOT fullStateOps)
+
+    // ═══════════════════════════════════════════════════════════════
+    // Step 4: 冲突检测（对每个常规操作） ← 详见 5.4
+    // ═══════════════════════════════════════════════════════════════
+    conflicts = []
+    nonConflictingOps = []
+
+    for each remoteOp in regularOps:
+        // 🕐 VectorClockService 获取本地对该实体的前沿向量时钟
+        // ⏱️ 前沿 = 该实体在 IndexedDB 中最近一条已应用操作的时钟
+        //         ∪ 该实体所有待同步操作的时钟（取 last-write-wins）
+        localFrontier = vectorClockService.getEntityFrontier(
+            remoteOp.entityType, remoteOp.entityId
+        )
+
+        // 🕐 核心比较
+        comparison = compareVectorClocks(localFrontier, remoteOp.vectorClock)
+
+        switch comparison:
+            case 'GREATER_THAN':   // 本地更新 → 跳过远程（已过时）
+                skip(remoteOp)
+            case 'EQUAL':          // 相同 → 跳过（重复）
+                skip(remoteOp)
+            case 'LESS_THAN':      // 远程更新 → 非冲突，直接应用
+                nonConflictingOps.push(remoteOp)
+            case 'CONCURRENT':     // 🔥 真正冲突！
+                conflicts.push(EntityConflict{
+                    entityType: remoteOp.entityType,
+                    entityId:   remoteOp.entityId,
+                    localOps:   getPendingOpsForEntity(...),   // ⏱️ 本地未同步操作
+                    remoteOps:  [remoteOp]
+                })
+
+    // ═══════════════════════════════════════════════════════════════
+    // Step 5: 冲突解决 / 直接应用
+    // ═══════════════════════════════════════════════════════════════
+    if conflicts.length > 0:
+        // 🔥 有冲突 → LWW 自动解决  ← 详见 5.5
+        resolution = conflictResolutionService.autoResolveConflictsLWW(
+            conflicts,
+            nonConflictingOps   // 非冲突操作打包一起应用（保证依赖排序）
+        )
+        localWinOpsCreated = resolution.localWinOpsCreated
+    else:
+        // ✅ 无冲突 → 直接应用所有远程操作
+        operationApplier.applyNonConflictingOps(
+            nonConflictingOps ++ fullStateOps
+        )
+        localWinOpsCreated = 0
+
+    // ═══════════════════════════════════════════════════════════════
+    // Step 6: Checkpoint D — 状态验证和修复
+    // ═══════════════════════════════════════════════════════════════
+    validateStateService.validateAndRepairCurrentState(
+        'remote-ops-processing'
+    )
+    // 检查：任务引用的项目/标签是否存在、子任务是否孤儿、
+    //       taskIds 数组是否一致 等
+
+    return { localWinOpsCreated, allOpsFilteredBySyncImport, ... }
+```
+
+### 5.4 冲突检测：向量时钟比较详解
+
+这是整个同步系统最核心的逻辑。理解这个就理解了为什么需要向量时钟。
+
+#### 5.4.1 compareVectorClocks() 算法
+
+```
+compareVectorClocks(clockA, clockB) → VectorClockComparison:
+    // 伪代码
+    allKeys = union(keys(clockA), keys(clockB))
+
+    aGreaterInSome = false   // clockA 在某些 key 上更大
+    bGreaterInSome = false   // clockB 在某些 key 上更大
+
+    for each key in allKeys:
+        valA = clockA[key] ?? 0
+        valB = clockB[key] ?? 0
+        if valA > valB: aGreaterInSome = true
+        if valB > valA: bGreaterInSome = true
+
+    if aGreaterInSome AND NOT bGreaterInSome:   return 'GREATER_THAN'
+    if bGreaterInSome AND NOT aGreaterInSome:   return 'LESS_THAN'
+    if NOT aGreaterInSome AND NOT bGreaterInSome: return 'EQUAL'
+    return 'CONCURRENT'   // 双方都在某些 key 上更大 → 无法排序
+```
+
+**示例：**
+
+```
+clockA = { A: 3, B: 2 }    // client-A 做了 3 个操作，知道 client-B 做了 2 个
+clockB = { A: 2, B: 4 }    // client-B 做了 4 个操作，知道 client-A 做了 2 个
+
+比较:
+  key A: 3 > 2 → aGreaterInSome = true
+  key B: 2 < 4 → bGreaterInSome = true
+  → CONCURRENT  ← 双方都不知道对方的最新操作！
+```
+
+#### 5.4.2 操作在冲突检测中判断什么
+
+冲突检测比较的是 **实体级的向量时钟**，不是操作本身的时钟：
+
+```
+// ⏱️ VectorClockService.getEntityFrontier() 的过程：
+
+getEntityFrontier(entityType, entityId):
+    // 1. 从 IndexedDB 查询该实体最后一条已应用操作的向量时钟
+    lastAppliedClock = opLogStore.getLastAppliedClock(entityType, entityId)
+    //   SELECT vectorClock FROM SUP_OPS
+    //   WHERE entityType = ? AND entityId = ? AND synced = 1
+    //   ORDER BY seq DESC LIMIT 1
+
+    // 2. 查询该实体所有待同步操作的向量时钟
+    pendingOps = opLogStore.getUnsyncedForEntity(entityType, entityId)
+    //   SELECT * FROM SUP_OPS
+    //   WHERE entityType = ? AND entityId = ? AND synced = 0
+
+    // 3. 构建前沿 = 已应用的时钟 ∪ 所有待同步时钟中"最新的"
+    frontier = lastAppliedClock
+    for each pending in pendingOps:
+        // last-write-wins 语义：取每个 clientId 的最大计数器值
+        frontier = mergeVectorClocks(frontier, pending.vectorClock)
+
+    return frontier
+```
+
+**为什么是实体前沿而不是操作时钟？**
+
+因为一个实体可能被多次修改。当我们收到远程的 Update 操作时，需要知道的是"本地对这个实体知道了多少"，而不是"远程操作在它自己的时间线上排第几个"。
+
+#### 5.4.3 冲突判断表
+
+| 比较结果       | 含义                                            | 处理               |
+| -------------- | ----------------------------------------------- | ------------------ |
+| `GREATER_THAN` | 本地前沿 > 远程时钟：本地已经知道这个操作的效果 | 跳过（已过时）     |
+| `EQUAL`        | 本地前沿 == 远程时钟：本地已经应用过这个操作    | 跳过（重复）       |
+| `LESS_THAN`    | 本地前沿 < 远程时钟：远程有本地不知道的新内容   | 直接应用（非冲突） |
+| `CONCURRENT`   | 双方都不知道对方的最新状态 → **真正的冲突**     | LWW 解决           |
+
+**怎么理解 CONCURRENT？**
+
+```
+场景：手机(client-A)和电脑(client-B)都修改了任务 T1
+
+手机: 操作 A3 { entityId: "T1", clock: {A:3, B:2} }
+      → 手机知道 B 做了 2 个操作
+
+电脑: 操作 B3 { entityId: "T1", clock: {A:2, B:3} }
+      → 电脑知道 A 做了 2 个操作
+
+当电脑收到 A3 时：
+  getEntityFrontier("TASK", "T1") = { A:2, B:3 }  ← 电脑的本地前沿
+  remoteOp.vectorClock              = { A:3, B:2 }  ← A3 的时钟
+
+  compareVectorClocks({A:2,B:3}, {A:3,B:2}):
+    key A: 2 < 3 → bGreaterInSome
+    key B: 3 > 2 → aGreaterInSome
+    → CONCURRENT  ← 双方都不知道对方的最新操作！
+```
+
+#### 5.4.4 SYNC_IMPORT 过滤：为什么按向量时钟丢弃操作
+
+`SyncImportFilterService` 的工作是：当本地导入了全量状态（SYNC_IMPORT），远程还在发来导入之前的旧操作
+——这些操作应该被丢弃，因为 SYNC_IMPORT 已经包含了它们的最终效果。
+
+```
+SyncImportFilterService.filterOpsInvalidatedBySyncImport(remoteOps):
+    // 1. ⏱️ 找到本地未同步的 SYNC_IMPORT（最近一次全量导入）
+    localImport = opLogStore.getLatestUnsyncedFullStateOp()
+
+    // 2. 如果没有未同步的 SYNC_IMPORT，不过滤任何操作
+    if not localImport: return { remainingOps: remoteOps }
+
+    // 3. 🕐 对比每个远程操作的向量时钟 vs SYNC_IMPORT 的时钟
+    for each remoteOp in remoteOps:
+        cmp = compareVectorClocks(remoteOp.vectorClock, localImport.vectorClock)
+        if cmp === 'LESS_THAN' OR cmp === 'EQUAL' OR cmp === 'CONCURRENT':
+            // 远程操作"不新于"SYNC_IMPORT → 丢弃
+            // 理由：SYNC_IMPORT 是所有操作的"结果"，不需要再应用中间步骤
+            filteredOut.push(remoteOp)
+        else:  // 'GREATER_THAN'
+            // 远程操作在 SYNC_IMPORT 之后产生 → 保留（确实有新信息）
+            remaining.push(remoteOp)
+
+    return { remainingOps: remaining, filteredOps: filteredOut }
+```
+
+### 5.5 LWW 自动解决：autoResolveConflictsLWW()
+
+当检测到 CONCURRENT 冲突时，系统完全自动解决——不弹对话框，不影响用户。
+
+```
+ConflictResolutionService.autoResolveConflictsLWW(conflicts, nonConflictingOps):
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 1: 对每个冲突执行 LWW 判定
+    // ═══════════════════════════════════════════════════════════════
+    resolutions = []
+    for each conflict in conflicts:
+
+        // ── 特殊情况 1: 双方都删除 → 自动解决 ──
+        if allLocalDelete AND allRemoteDelete:
+            // 双方都删了同一个实体，效果一致
+            resolutions.push({ winner: 'remote' })   // 选谁都一样
+            continue
+
+        // ── 特殊情况 2: 单操作 + 相同 payload → 自动解决 ──
+        if localOps.length===1 AND remoteOps.length===1 AND localPayload===remotePayload:
+            resolutions.push({ winner: 'remote' })   // 内容一致，无冲突
+            continue
+
+        // ── 特殊情况 3: 归档操作总是赢 ──
+        // 归档是用户明确表示"我处理完这个任务了"
+        // 不允许并发修改覆盖归档操作
+        if remoteOps 中有归档操作:
+            resolutions.push({ winner: 'remote' })
+            continue
+        if localOps 中有归档操作:
+            // 本地归档赢 → 创建新的归档操作（携带当前状态）
+            currentState = 从 NgRx Store 读取该实体
+            🕐 mergedClock = mergeVectorClocks(所有冲突操作的时钟) + increment
+            newOp = createLWWUpdateOp(entityType, entityId, currentState,
+                                       clientId, mergedClock, localMaxTimestamp)
+            resolutions.push({ winner: 'local', localWinOp: newOp })
+            continue
+
+        // ── 正常 LWW: 比较时间戳 ──
+        localMaxTs  = max(localOps.map(op => op.timestamp))
+        remoteMaxTs = max(remoteOps.map(op => op.timestamp))
+
+        if localMaxTs > remoteMaxTs:
+            // ✅ 本地赢
+            // 从 NgRx Store 读取当前实体状态
+            currentState = 从 NgRx Store 读取该实体
+            // 🕐 合并所有冲突操作时钟 + 递增本地计数器
+            //   这样新操作的时钟"支配"所有旧操作
+            allClocks = localOps.clocks + remoteOps.clocks
+            mergedClock = mergeAndIncrement(allClocks, clientId)
+            // 保留本地最大时间戳（保留"赢"的语义）
+            newOp = createLWWUpdateOp(entityType, entityId, currentState,
+                                       clientId, mergedClock, localMaxTs)
+            // ⏱️ 新操作将在下次同步中上传
+            resolutions.push({ winner: 'local', localWinOp: newOp })
+        else:
+            // ✅ 远程赢（remoteMaxTs >= localMaxTs，平局时远程优先）
+            resolutions.push({ winner: 'remote' })
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase 2: 批量应用所有操作
+    // ═══════════════════════════════════════════════════════════════
+    allOpsToApply = []
+
+    for each resolution in resolutions:
+        if resolution.winner === 'local':
+            // 拒绝所有过时操作（本地 + 远程）
+            localOpsToReject.push(...resolution.conflict.localOps)
+            remoteOpsToReject.push(...resolution.conflict.remoteOps)
+            // 加入新的 LWW Update 操作
+            allOpsToApply.push(resolution.localWinOp)
+        else:  // remote wins
+            // 拒绝本地过时操作
+            // 🕐 关键：如果本地有多个操作修改同一实体，全部拒绝
+            //   不能只用最新一个——旧操作的向量时钟已经过时
+            localOpsToReject.push(...resolution.conflict.localOps)
+            // 应用远程操作
+            allOpsToApply.push(...resolution.conflict.remoteOps)
+
+    // 同时打包非冲突操作（保证依赖排序正确，如 Task 依赖先建立的 Project）
+    allOpsToApply.push(...nonConflictingOps)
+
+    // ── 原子性保护 ──
+    // ⏱️ 先标记拒绝操作（写入 IndexedDB），再应用操作
+    opLogStore.markRejected(localOpsToReject, remoteOpsToReject)
+    // 如果应用过程中崩溃，重启后 IndexedDB 中的 rejected 标记
+    // 确保这些操作不会被重新上传
+
+    // ✅ 批量应用（一次 NgRx dispatch）
+    operationApplier.applyAll(allOpsToApply)
+
+    // 🕐 合并远程操作的向量时钟到本地
+    for each appliedOp:
+        mergedLocalClock = mergeVectorClocks(localClock, appliedOp.vectorClock)
+    opLogStore.setVectorClock(mergedLocalClock)
+
+    // 🔧 Checkpoint D: 状态验证和修复
+    validateAndRepairCurrentState('conflict-resolution')
+
+    return { localWinOpsCreated: count of local win ops }
+```
+
+**本地赢时的关键逻辑：为什么创建新操作而不是复用旧操作？**
+
+```
+假设：手机修改 T1 (clock {A:3,B:2})，电脑修改 T1 (clock {A:2,B:3})
+电脑的 LWW 判定本地赢（电脑时间戳更大）
+
+错误做法 ❌：只拒绝远程操作，保留本地操作
+  → 问题：本地操作的时钟是 {A:2,B:3}
+  → 远程的 {A:3,B:2} 没有被合并
+  → 下次手机上传操作时，它的时钟 {A:3,B:2} vs 本地前沿 {A:2,B:4}
+  → 仍然是 CONCURRENT！死循环！
+
+正确做法 ✅：拒绝双方操作，创建新操作
+  → 新操作时钟 = merge({A:2,B:3}, {A:3,B:2}) + increment B
+             = {A:3, B:4}
+  → 携带当前实体状态（电脑版本的 T1）
+  → 新时钟 "支配" 双方的旧时钟
+  → 下次手机同步时发现 {A:3,B:4} GREATER_THAN {A:3,B:2}
+  → 远胜于本地，直接应用，冲突解决！
+```
+
+### 5.6 上传流程：uploadPendingOps()
+
+上传分为两层：`OperationLogSyncService`（高层编排）和 `FileBasedSyncAdapterService._uploadOps()`（文件操作）。
+
+#### 5.6.1 高层编排
+
+```
+OperationLogSyncService.uploadPendingOps(syncProvider):
+    // ── 前置检查 ──
+    // ⏱️ 确保所有正在写入的操作先刷盘
+    writeFlushService.flushPendingWrites()
+
+    // ⏱️ 安全检查：全新客户端不能上传（防止空数据覆盖远端）
+    if isWhollyFreshClient():
+        // 判定：无快照 AND lastSeq === 0
+        return { kind: 'blocked_fresh_client' }
+
+    // ⏱️ 服务器迁移检查（空服务器 + 有历史客户端 → 上传 SYNC_IMPORT）
+    serverMigrationService.checkAndHandleMigration(syncProvider)
+
+    // ── 实际上传 ──
+    result = uploadService.uploadPendingOps(syncProvider)
+    // ↓ 调用 syncProvider.uploadOps(pendingOps, clientId)
+    //   文件类 → FileBasedSyncAdapterService._uploadOps()
+    //   SuperSync → HTTP API
+
+    // ── 第 1 步：处理 piggybacked 操作（先于 rejected 处理） ──
+    // 原理：上传时服务器可能返回其他客户端的新操作。
+    // 这些操作必须先处理，因为它们可能是导致本地操作被"拒绝"的原因。
+    // 如果先标记 rejected 再处理 piggybacked，冲突检测将看不到本地待同步操作。
+    if result.piggybackedOps.length > 0:
+        processRemoteOps(result.piggybackedOps)
+        // ↑ 可能弹出 SYNC_IMPORT 冲突对话框
+        // ↑ 可能触发 LWW 冲突解决
+
+    // ── 第 2 步：处理被拒绝的操作 ──
+    rejectionResult = rejectedOpsHandlerService.handleRejectedOps(
+        result.rejectedOps
+    )
+    // 被拒绝可能因为 CONCURRENT → RejectedOpsHandler 会创建 merged ops
+    localWinOpsCreated = rejectionResult.mergedOpsCreated
+
+    return {
+        kind: 'completed',
+        uploadedCount: result.uploadedCount,
+        localWinOpsCreated,
+        ...
+    }
+```
+
+#### 5.6.2 文件类 Provider 的上传（FileBasedSyncAdapterService.\_uploadOps）
+
+```
+FileBasedSyncAdapterService._uploadOps(ops, clientId):
+    // ═══════════════════════════════════════════════════════════════
+    // Step 1: 获取当前远端状态
+    // ═══════════════════════════════════════════════════════════════
+    // 先检查缓存（_downloadOps 在本次同步周期中已下载过）
+    //   命中 → 省一次 API 调用
+    //   未命中 → provider.downloadFile("sync-data.json")
+    { currentData, currentSyncVersion, fileExists, revToMatch }
+        = _getCurrentSyncState(provider)
+
+    if ops.length === 0 AND fileExists:
+        return { results: [] }   // 没有操作要上传
+
+    // 🔒 检查版本预期
+    expectedVersion = expectedSyncVersions.get(providerKey)
+    if currentData AND currentSyncVersion !== expectedVersion:
+        // 版本变了（其他客户端在上次下载后修改了文件）
+        // 我们会合并到最新数据，然后上传
+        log("Version changed, merging...")
+
+    // ═══════════════════════════════════════════════════════════════
+    // Step 2: 构建合并后的 sync-data.json
+    // ═══════════════════════════════════════════════════════════════
+    newData = _buildMergedSyncData(currentData, ops, clientId, currentSyncVersion):
+
+        newSyncVersion = currentSyncVersion + 1                 // 🔒 递增乐观锁
+
+        // 🕐 合并向量时钟：将每个上传操作的时钟合并到远端时钟
+        mergedClock = currentData?.vectorClock ?? {}
+        for each op in ops:
+            mergedClock = mergeVectorClocks(mergedClock, op.vectorClock)
+
+        // ⏱️ 合并 recentOps：追加新操作，裁剪到 500 条
+        compactOps = ops.map(op => compactEncode(op))           // 压缩编码
+        for each compactOp in compactOps:
+            compactOp.sv = newSyncVersion                       // 标记上传批次
+
+        mergedOps = (currentData?.recentOps ?? [])
+            .concat(compactOps)
+            .slice(-500)                                        // 保留最新 500
+
+        // oldestOpSyncVersion: 记录最老操作的 sv，用于 gap 检测
+        oldestOpSyncVersion = mergedOps[0]?.sv
+
+        // ⏱️ 从 NgRx Store 读取最新状态快照
+        currentState = stateSnapshotService.getStateSnapshot()
+
+        // ⏱️ 从 IndexedDB 读取归档数据
+        archiveYoung = archiveDbAdapter.loadArchiveYoung()
+        archiveOld   = archiveDbAdapter.loadArchiveOld()
+
+        return {
+            version: 2,
+            syncVersion: newSyncVersion,
+            schemaVersion: ops[0]?.schemaVersion,
+            vectorClock: mergedClock,
+            lastModified: Date.now(),
+            clientId,
+            state: currentState,
+            archiveYoung, archiveOld,
+            recentOps: mergedOps,
+            oldestOpSyncVersion
+        }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Step 3: 上传（带乐观锁冲突处理）
+    // ═══════════════════════════════════════════════════════════════
+    _uploadWithMismatchFallback(newData, revToMatch):
+        // 🔒 加密 + 压缩
+        uploadData = encryptAndCompress(newData)
+
+        try:
+            // 🔒 附带 If-Match: revToMatch 进行乐观锁校验
+            provider.uploadFile("sync-data.json", uploadData, revToMatch)
+            return { finalSyncVersion: newData.syncVersion }
+
+        catch UploadRevToMatchMismatchAPIError:
+            // 🔥 ETag 不匹配 → 重新下载确认
+            // 这种情况发生在：我们下载文件后、上传前，另一个客户端修改了文件
+
+            { freshRev } = provider.downloadFile("sync-data.json")
+
+            if freshRev === revToMatch:
+                // rev 没变 → 服务器端 ETag/timestamp 不一致（非真正并发）
+                // 强制覆盖上传
+                provider.uploadFile("sync-data.json", uploadData, freshRev,
+                                     isForceOverwrite=true)
+                return { finalSyncVersion: newData.syncVersion }
+            else:
+                // 🔥 真正的并发上传！另一个客户端在我们之前修改了文件
+                // 不能在此处合并——我们的 NgRx 快照还没应用对方的新操作
+                // 抛出异常 → 下次同步周期下载对方操作 → 应用 → 重新上传
+                throw ConcurrentUploadError
+
+    // ═══════════════════════════════════════════════════════════════
+    // Step 4: 上传后处理
+    // ═══════════════════════════════════════════════════════════════
+    clearCachedSyncData(providerKey)
+    expectedSyncVersions.set(providerKey, finalSyncVersion)
+    persistState()   // 写入 localStorage 以防重启
+
+    // 构建响应：每个操作标记为 accepted
+    return {
+        results: ops.map((op, i) => ({
+            opId: op.id,
+            accepted: true,
+            serverSeq: startingSeq + i + 1   // 合成序列号（syncVersion-based）
+        })),
+        latestSeq: finalSyncVersion
+    }
+```
+
+### 5.7 完整同步周期的数据流总结
+
+把上面的所有步骤串起来，一次完整的同步周期涉及以下数据结构的流转：
+
+```
+                         ┌──────────────┐
+                         │  NgRx Store  │  ← 应用状态（tasks, projects, tags...）
+                         └──────┬───────┘
+                                │ getStateSnapshot()
+                                ▼
+    ┌───────────────────────────────────────────────────────────────┐
+    │              FileBasedSyncAdapterService                      │
+    │                                                               │
+    │  _downloadOps():                                              │
+    │    downloadFile → 解密 → 返回 ops[] + snapshotState           │
+    │                        🕐 返回 vectorClock                     │
+    │                        🔒 返回 syncVersion (作为 latestSeq)     │
+    │                                                               │
+    │  _uploadOps():                                                │
+    │    getState + mergeOps + mergeClocks → uploadFile             │
+    │    ⏱️ 读 NgRx snapshot      🕐 merge vector clocks            │
+    │    ⏱️ 读 IndexedDB archives 🔒 syncVersion++                  │
+    │    ⏱️ 构建 recentOps                                         │
+    └───────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+    ┌───────────────────────────────────────────────────────────────┐
+    │              OperationLogSyncService                          │
+    │                                                               │
+    │  downloadRemoteOps():                                         │
+    │    ⏱️ isFresh? → 检查 IndexedDB 是否有历史                    │
+    │    🕐 compareVectorClocks(local, remote) → skip if dominated  │
+    │    ⏱️ getUnsynced() → 是否有本地修改需要保护                   │
+    │    → 调用 processRemoteOps()                                  │
+    │                                                               │
+    │  uploadPendingOps():                                          │
+    │    ⏱️ flushPendingWrites() → 确保操作已写入 IndexedDB         │
+    │    ⏱️ isFresh? → 阻止空客户端上传                             │
+    │    ⏱️ getUnsynced() → 获取待上传操作                          │
+    └───────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+    ┌───────────────────────────────────────────────────────────────┐
+    │              RemoteOpsProcessingService                       │
+    │                                                               │
+    │  Step 4: 冲突检测                                             │
+    │    ⏱️ getEntityFrontier() → 从 IndexedDB 读取实体最后操作      │
+    │    🕐 compareVectorClocks(frontier, remoteClock)               │
+    │       → GREATER_THAN / EQUAL / LESS_THAN / CONCURRENT         │
+    │                                                               │
+    │  Step 5: LWW 解决 (→ ConflictResolutionService)               │
+    │    🕐 mergeVectorClocks(allConflictClocks) + increment         │
+    │    ⏱️ markRejected(过时 ops) → 写入 IndexedDB                 │
+    │    ⏱️ createLWWUpdateOp() → 新操作写入 IndexedDB (unsynced)    │
+    └───────────────────────────────────────────────────────────────┘
+```
+
+**关键数据结构关系：**
+
+| 数据结构               | 存储位置               | 作用                 | 何时读写                             |
+| ---------------------- | ---------------------- | -------------------- | ------------------------------------ |
+| `Operation`            | IndexedDB `SUP_OPS`    | 不可变操作记录       | 操作捕获时写；冲突检测/上传时读      |
+| `VectorClock`          | Operation 内嵌字段     | 追踪因果顺序         | 🕐 创建操作时递增；比较时 merge      |
+| `FileBasedSyncData`    | sync-data.json (远端)  | 文件同步载体         | 下载时解密读取；上传时构建写入       |
+| `syncVersion`          | FileBasedSyncData 字段 | 乐观锁计数器         | 🔒 上传前校验；上传后 +1             |
+| `recentOps`            | FileBasedSyncData 字段 | 最近 500 条操作      | 用于冲突检测的实体级比较             |
+| NgRx Store             | 内存                   | 当前应用状态         | LWW 本地赢时读取实体状态；水合时写入 |
+| `expectedSyncVersions` | localStorage Map       | 记录预期 syncVersion | 断电重启后恢复乐观锁状态             |
 
 ---
 
