@@ -342,7 +342,7 @@ SyncWrapperService._sync():
     // 具体例子：
     //   手机改了 T1 标题（timestamp=1000），电脑改了 T1 标签（timestamp=1005）
     //   电脑同步时发现 CONCURRENT → LWW 判定电脑赢（1005 > 1000）
-    //   → 创建新操作 OP_NEW（clock={A:7,B:6}，携带电脑上的 T1 完整状态）
+    //   → 创建新操作 OP_NEW（clock={A:6,B:6}，携带电脑上的 T1 完整状态）
     //   → OP_NEW 现在在 IndexedDB 里，状态是 unsynced
     //   → 这个循环检测到 pendingLwwOps=1 → 再调一次 uploadPendingOps
     pendingLwwOps = downloadResult.localWinOpsCreated + uploadResult.localWinOpsCreated
@@ -459,12 +459,13 @@ FileBasedSyncAdapterService._downloadOps(sinceSeq, excludeClient):
     needsGapDetection = versionWasReset OR snapshotReplacement OR partialTrimGap
 
     // ── C. 构建操作列表 ──
+    // recentOps 是从旧到新排列的数组（下标 0 = 最老，最后一个 = 最新）
     filteredOps = []
-    for (compactOp, index) in syncData.recentOps:
+    for (compactOp, index) in syncData.recentOps:    // index = 0, 1, 2, ...（数组下标）
         if excludeClient AND compactOp.clientId === excludeClient:
             continue   // 跳过自己上传的，自己不需要再应用一遍
         filteredOps.push({
-            serverSeq: index + 1,                    // 合成分序列号（仅用于兼容）
+            serverSeq: index + 1,                    // 用下标+1合成序列号（仅用于兼容接口）
             op: compactToSyncOp(compactOp),          // SyncFileCompactOp → SyncOperation
             receivedAt: compactOp.ts
         })
@@ -479,12 +480,13 @@ FileBasedSyncAdapterService._downloadOps(sinceSeq, excludeClient):
         else:
             undefined
 
+    // 这个 return 的值就是 5.2.2 中 `result = downloadService.downloadRemoteOps(...)` 拿到的 result
     return {
         ops: filteredOps.slice(0, 500),
         latestSeq: syncData.syncVersion,          // 🔒 syncVersion 作为逻辑序列号
         snapshotVectorClock: syncData.vectorClock, // 🕐 快照的整体向量时钟
         gapDetected: needsGapDetection,            // 如果 true，上层会从 seq 0 重试
-        snapshotState: snapshotState                // seq 0 时返回完整状态
+        snapshotState: snapshotState                // 仅 sinceSeq=0 时有值，是完整应用状态对象
     }
 ```
 
@@ -503,23 +505,33 @@ OperationLogSyncService.downloadRemoteOps(syncProvider):
         return { kind: 'server_migration_handled' }
 
     // ── 场景 2：全量下载（seq 0），远端有完整状态快照 ──
+    // snapshotState 是从 sync-data.json 的 state 字段解析出来的完整应用状态
+    // （tasks + projects + tags + notes + config...），不是 bool 值。
+    // 只有 sinceSeq=0（全量下载）时才有值，用来给新客户端做初始化。
     if result.snapshotState:
-        // 🕐 短路优化
+        // 🕐 短路优化：为什么要比向量时钟？
+        //   即使远端返回了完整状态，也不能直接覆盖本地——
+        //   本地可能有更"新"的数据（离线修改了但还没上传）。
+        //   例子：电脑本地时钟 {A:6,B:7}，远端时钟 {A:6,B:6}
+        //   → GREATER_THAN：本地比远端多了一个操作，跳过水合保护本地数据
         localClock  = opLogStore.getVectorClock()      // ⏱️ 从 IndexedDB 读本地向量时钟
         remoteClock = result.snapshotVectorClock
 
         if localClock 非空 AND remoteClock 非空:
             cmp = compareVectorClocks(localClock, remoteClock)
             if cmp === 'EQUAL' OR cmp === 'GREATER_THAN':
-                // 白话：本地的向量时钟等于或大于远端的 → 本地已经有远端的所有数据
-                // 甚至可能更多（本地还有未同步的操作）
-                // 没必要水合，跳过。
+                // 白话：本地时钟 ≥ 远端时钟 → 本地已经拥有远端的所有信息
+                // EQUAL: 完全同步，没必要水合
+                // GREATER_THAN: 本地还有远端不知道的操作（未同步的），
+                //   不能用水合覆盖，否则会丢数据
                 return { kind: 'no_new_ops' }
 
-        // ⚠️ 本地有未同步的操作 → 冲突！不能静默覆盖
+        // ⚠️ 走到这里说明本地时钟 < 远端时钟（远端有本地不知道的新数据）
+        // 但还要检查：本地有没有还没同步的操作？
         unsyncedOps = opLogStore.getUnsynced()          // ⏱️ 从 IndexedDB 查
         if unsyncedOps.length > 0:
-            // 🔥 弹出冲突对话框：用户手动选择 USE_LOCAL 还是 USE_REMOTE
+            // 🔥 最坏情况：本地和远端都有对方不知道的数据
+            // 不能自动解决 → 弹出冲突对话框让用户手动选
             throw LocalDataConflictError(...)
 
         // 新客户端引导
@@ -545,18 +557,24 @@ OperationLogSyncService.downloadRemoteOps(syncProvider):
     if result.newOps.length === 0:
         return { kind: 'no_new_ops' }
 
-    // ── 场景 4：有增量操作 ──
-    // 先检查里面有没有 SYNC_IMPORT（全量导入操作）
+    // ── 场景 4：正常的增量同步（最常见的情况）──
+    // 远端有我们没见过的普通操作（不是全量快照），需要一条条处理。
+    //
+    // 但先做一个特殊检查：这些操作里有没有 SYNC_IMPORT？
+    // SYNC_IMPORT 是一种特殊的"全量导入操作"——某个客户端把它的完整状态
+    // 打包成一个操作上传了（比如：新设备第一次同步、从备份恢复）。
+    // 如果收到了 SYNC_IMPORT 而本地也有未同步的操作 → 冲突！
+    // 因为 SYNC_IMPORT 代表"用我的全部状态替换现有的一切"。
     incomingFullStateOp = result.newOps.find(op => FULL_STATE_OP_TYPES.has(op.opType))
     if incomingFullStateOp:
         pendingOps = opLogStore.getUnsynced()           // ⏱️
         if hasMeaningfulPendingOps(pendingOps):
-            // 🔥 冲突对话框："远端导入了新数据，本地也有未同步的数据"
+            // 🔥 冲突对话框："别人导入了完整数据，你本地也有没同步的修改"
             resolution = showSyncImportConflictDialog()
             if resolution === 'CANCEL': return { kind: 'cancelled' }
-            // USE_LOCAL → forceUploadLocalState()
-            // USE_REMOTE → forceDownloadRemoteState()
-        // 如果 pending 中没有有意义的用户数据 → 静默接受远端
+            // USE_LOCAL → 上传本地数据覆盖远端
+            // USE_REMOTE → 下载远端数据丢弃本地
+        // 如果 pending 是空的或者没有有意义的用户数据 → 静默接受远端
 
     // ✅ 核心步骤：处理远程操作（详见 5.3）
     processResult = remoteOpsProcessingService.processRemoteOps(result.newOps)
@@ -686,7 +704,8 @@ RemoteOpsProcessingService.processRemoteOps(remoteOps):
         )
         localWinOpsCreated = resolution.localWinOpsCreated
         // 在我们的例子中：B5.ts=1005 > A6.ts=1000 → 本地赢
-        // → 创建新操作 OP_NEW（clock={A:7,B:6}）→ localWinOpsCreated = 1
+        // → 创建新操作 OP_NEW（clock={A:6,B:6}）→ localWinOpsCreated = 1
+        //   因为 merge({A:5,B:5}, {A:6,B:4}) = {A:6,B:5}, B是本地再+1 → {A:6,B:6}
     else:
         operationApplier.applyNonConflictingOps(
             nonConflictingOps ++ fullStateOps
@@ -779,6 +798,16 @@ getEntityFrontier(entityType="TASK", entityId="T1"):
 **为什么用实体前沿而不是直接用操作的时钟？**
 因为一个实体可能被多次修改。如果电脑连续改了 T1 三次（B5, B6, B7），只比较远程 A6 vs 本地 B7 是不够的——B5 和 B6 也是冲突的。前沿把"本地所有关于这个实体的知识"压缩成一个时钟，一次比较就知道全部情况。
 
+**操作保留策略：每个实体保留所有操作，不只最新的**
+
+IndexedDB 保留每个操作（不管是不是同实体），不做"同实体去重"。一个实体被改 10 次就是 10 条操作。这很重要，因为：
+
+- 每条操作都有独立的向量时钟，用于冲突检测时构建完整的 entity frontier
+- 启动时回放所有操作来恢复状态
+- 如果一个实体的旧操作被删了，就检测不到"远程操作其实是冲突的"——旧操作的时钟也是实体知识边界的一部分
+
+远端 `recentOps` 保留最近 500 条操作（不分实体），超出则裁剪最旧的——这就是需要 `oldestOpSyncVersion` 做 gap 检测的原因。
+
 #### 5.4.3 冲突判断速查表
 
 | 比较结果       | 含义                                               | 处理        |
@@ -850,12 +879,16 @@ ConflictResolutionService.autoResolveConflictsLWW(conflicts, nonConflictingOps):
             // currentState = { title: "买牛奶", tags: ["购物","紧急"], notes: "" }
 
             // 🕐 合并双方时钟 + 递增
+            // 规则：每个 clientId 取最大值，然后本地 clientId 再 +1
+            // 为什么这样设计？
+            //   - 取最大值：承认"我知道A做到了第6个，B做到了第5个"
+            //   - B再+1：因为B（本地）在这一切基础上又多做了一个操作
+            //   - 这样新时钟在每个维度上都 ≥ 所有冲突时钟 → 彻底解决冲突
             allClocks = [{A:5,B:5}, {A:6,B:4}]
             mergedClock = mergeAndIncrement(allClocks, clientId="B")
-            // merge: {A: max(5,6)=6, B: max(5,4)=5}
-            // increment B: {A:6, B:6}  ← 新时钟"支配"所有冲突时钟！
-            // 验证: {A:6,B:6} GREATER_THAN {A:6,B:4} ✓
-            //       {A:6,B:6} GREATER_THAN {A:5,B:5} ✓
+            // merge: A: max(5,6)=6, B: max(5,4)=5
+            // increment B (只有B，不是A): {A:6, B:6}
+            // 注意：如果冲突的客户端是3个（A/B/C），A和C都取max，只有本地B+1
 
             // ⏱️ 创建新的 LWW Update 操作
             newOp = createLWWUpdateOp(
