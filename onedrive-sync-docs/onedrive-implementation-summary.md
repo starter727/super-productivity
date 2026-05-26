@@ -273,7 +273,7 @@ async _refreshAccessTokenIfNeeded(): Promise<void> {
 - `access_token` 有效期约 1 小时
 - `refresh_token` 有效期 90 天（默认）
 - 每次 API 调用前检查 `expiresAt`，提前 5 分钟刷新
-- Token 仅存在内存，应用重启后重新授权
+- Token 通过 Electron `safeStorage` / Web `sessionStorage` 加密持久化，应用重启后无需重新授权（除非 refresh_token 已过期）
 
 ---
 
@@ -346,14 +346,15 @@ Headers: If-Match: "expected-etag"
 │ (不勾选则用官方 Client ID，如果可用) │
 │ │
 │ Client ID: [________________] │
-│ Client Secret: [________________] │ ← 仅 custom app
+│ Tenant ID: [common] │
+│ Sync Folder Path: [Super Productivity] │
 │ │
-│ [Authorize] 按钮 → 启动 OAuth 流程 │
+│ [Authorize] 按钮 → 启动 PKCE OAuth 流程 │
 │ │
 │ ⚫ 已授权 / ⚪ 需要授权 / 🔒 已加密 │
 └────────────────────────────────────────────┘
 
-```
+````
 
 ### 6.2 官方 Client ID 机制
 
@@ -451,4 +452,5 @@ Headers: If-Match: "expected-etag"
 - [Microsoft Identity - PKCE](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)
 - [OAuth 2.1 草案](https://datatracker.ietf.org/doc/draft-ietf-oauth-v2-1/)
 - [Super Productivity Sync Architecture](../docs/sync-and-op-log/)
-```
+- [PR Review Lessons Learned](./review-lessons-learned.md) — 9 轮 review 中踩过的坑和总结```
+````
