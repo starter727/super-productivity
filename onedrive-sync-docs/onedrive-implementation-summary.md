@@ -389,7 +389,80 @@ Headers: If-Match: "expected-etag"
 
 ---
 
-## 8. 测试覆盖
+## 8. 并发控制机制
+
+OneDrive 同步在一个多层并发保护下运行。以下机制是经过 9 轮 code review 逐一验证的核心安全网。
+
+### 8.1 并发控制全景
+
+```
+┌─────────────────────────────────────────────────┐
+│ 1. Token 刷新层    → 单飞锁                      │
+│ 2. 文件传输层      → ETag + If-Match (HTTP 412)  │
+│ 3. 内容同步层      → syncVersion 乐观锁           │
+│ 4. 首次创建层      → conflictBehavior=fail        │
+│ 5. 配置保存层      → _lastSettings 去重 + 条件展开 │
+│ 6. 凭证管理层      → 三重身份匹配                  │
+│ 7. 同步周期层      → _isSyncing 全局锁            │
+└─────────────────────────────────────────────────┘
+```
+
+### 8.2 Token 单飞锁
+
+防止并发 API 调用同时刷新 token（第二个调用会用已失效的 refresh_token）。
+
+```typescript
+private _isRefreshingToken = false;
+
+async _refreshAccessTokenIfNeeded(): Promise<void> {
+  if (this._isRefreshingToken) {
+    while (this._isRefreshingToken) {
+      await new Promise(r => setTimeout(r, 50));
+    }
+    return;
+  }
+  this._isRefreshingToken = true;
+  try {
+    // ... 调用 POST /token，更新内存中的 token
+  } finally {
+    this._isRefreshingToken = false;
+  }
+}
+```
+
+### 8.3 上传冲突处理（双层乐观锁）
+
+**第一层 — 内容层 syncVersion**: `FileBasedSyncAdapterService._uploadOps()` 比较本地预期 syncVersion 和远端实际 syncVersion。不匹配则拒绝。
+
+**第二层 — 传输层 ETag**: OneDrive 使用 HTTP `If-Match` 头。412 响应表示远端已被其他设备更新。
+
+412 后的处理 (`_uploadWithMismatchFallback`):
+1. 重新下载最新的 sync-data.json
+2. 比较 ETag：变了 → 合并后重试（最多 2 次）；没变 → 服务端时钟偏差，强制覆盖
+3. 重试仍失败 → 抛出异常，下次同步周期再处理
+
+### 8.4 首次创建保护 (`conflictBehavior=fail`)
+
+双设备同时初始化同步时，两者的第一次上传都期望文件不存在。使用 `conflictBehavior=fail` 让第二个上传失败：
+
+```
+设备 A PUT (rev='', conflict=fail) → 201 Created
+设备 B PUT (rev='', conflict=fail) → 409 Conflict → 下次同步周期重新下载
+```
+
+这是 reviewer 在 R3 轮发现的关键问题。"创建"和"更新"语义不同——创建时文件已存在说明另一台设备抢先了，必须显式感知冲突，而非静默覆盖。
+
+### 8.5 配置保存去重 + 条件展开
+
+Formly 对一次用户操作可能触发多次 `modelChange`。`updateSettingsFromForm()` 用 `_lastSettings` 的 JSON 比较过滤重复。配合条件展开（防止 `?? false` 覆盖已有的 true 值，详见 [review 经验教训](./review-lessons-learned.md#问题-4--false-对可选布尔值的破坏)），确保每次保存不会把未设置的字段变成 false。
+
+### 8.6 凭证身份变更检测
+
+OAuth token 绑定到 `(useCustomApp, clientId, tenantId)` 三元组。切换 Azure AD 应用时需原子性清除旧 token（详见 [review 经验教训](./review-lessons-learned.md#问题-6-切换-azure-ad-应用身份时旧-token-未清除)）。
+
+---
+
+## 9. 测试覆盖
 
 ### 8.1 单元测试 (onedrive.spec.ts)
 
@@ -412,9 +485,9 @@ Headers: If-Match: "expected-etag"
 
 ---
 
-## 9. 设计决策
+## 10. 设计决策
 
-### 9.1 为什么复用 FileSyncProvider 和适配器模式而非新建接口
+### 10.1 为什么复用 FileSyncProvider 和适配器模式而非新建接口
 
 - `FileBasedSyncAdapterService.createAdapter()` 将任意 `FileSyncProvider` 包装为 `OperationSyncCapable`，使文件存储提供者能参与统一的 op-log 同步系统
 - WebDAV / Dropbox / Nextcloud 已经有成熟的 file-based sync 模式
@@ -422,13 +495,13 @@ Headers: If-Match: "expected-etag"
 - 避免引入新的同步协议，降低维护成本
 - `WrappedProviderService` 作统一桥接：SuperSync 原生支持 op sync，file-based 通过 adapter 适配
 
-### 9.2 为什么 PKCE 而非 Client Secret
+### 10.2 为什么 PKCE 而非 Client Secret
 
 - Electron 应用无法安全存储 client_secret（可反编译）
 - PKCE 是 OAuth 2.1 推荐方式
 - Microsoft 要求 SPA/本地应用使用 PKCE
 
-### 9.3 为什么双重乐观锁（syncVersion + ETag）
+### 10.3 为什么双重乐观锁（syncVersion + ETag）
 
 - **内容层**：`syncVersion` 计数器内嵌在 `FileBasedSyncData` 中，不依赖服务端特性，跨所有 file-based provider 统一工作
 - **传输层**：ETag + `If-Match` 头提供即时版本不匹配检测（HTTP 412），避免无效上传消耗带宽
@@ -437,7 +510,7 @@ Headers: If-Match: "expected-etag"
 
 ---
 
-## 10. 已知限制
+## 11. 已知限制
 
 1. **无官方 Client ID**：每个用户需自建 Azure AD 应用
 2. **移动端未测**：iOS/Android WebView 的 OAuth 回调未验证
@@ -446,7 +519,7 @@ Headers: If-Match: "expected-etag"
 
 ---
 
-## 11. 相关资源
+## 12. 相关资源
 
 - [Microsoft Graph API - Drive](https://learn.microsoft.com/en-us/graph/api/resources/drive)
 - [Microsoft Identity - PKCE](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)

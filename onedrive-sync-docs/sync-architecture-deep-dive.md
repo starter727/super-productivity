@@ -25,6 +25,7 @@
 8. [文件同步适配器（共享层）](#8-文件同步适配器共享层)
 9. [Provider 层：OneDrive 的实现](#9-provider-层onedrive-的实现)
 10. [关键设计决策](#10-关键设计决策)
+11. [OneDrive PR Review 验证的并发模式](#11-onedrive-pr-review-验证的并发模式)
 
 ---
 
@@ -2013,14 +2014,60 @@ SuperSync 有专门的同步服务器，可以存储和查询操作。文件类 
 
 ---
 
-## 附录：文件类 Provider 对比
+## 11. OneDrive PR Review 验证的并发模式
 
-| 特性     | Dropbox    | OneDrive   | WebDAV     | LocalFile   | Nextcloud  |
-| -------- | ---------- | ---------- | ---------- | ----------- | ---------- |
-| 认证方式 | OAuth      | OAuth PKCE | 用户名密码 | 无          | 用户名密码 |
-| 存储位置 | App folder | App folder | 自定义路径 | 本地文件    | 自定义路径 |
-| 乐观锁   | rev (ETag) | ETag       | ETag       | syncVersion | ETag       |
-| 冲突解决 | 共享层 LWW | 共享层 LWW | 共享层 LWW | 共享层 LWW  | 共享层 LWW |
-| 操作同步 | 共享适配器 | 共享适配器 | 共享适配器 | 共享适配器  | 共享适配器 |
+> 2026 年 5 月 OneDrive PR (#7523) 经历了 9 轮 review。以下是在 review 中被验证或纠正的并发控制模式。完整记录见 [review 经验教训总结](./review-lessons-learned.md)。
+
+### 11.1 Review 验证通过的设计
+
+以下模式在初始实现中就是正确的，reviewer 确认了设计：
+
+**Token 单飞锁**: `_isRefreshingToken` 标志 + while 轮询（50ms 间隔）+ `finally` 保证重置。防止两个并发的 API 调用同时刷新 token。
+
+**双层乐观锁**: syncVersion（内容层）+ ETag（传输层）互补 —— syncVersion 跨 provider 统一，ETag 提供即时 HTTP 412 检测。
+
+**syncVersion 递增的原子性**: `_buildMergedSyncData()` 每次合并都递增 syncVersion，保证版本号单调递增。
+
+### 11.2 Review 发现并修正的问题
+
+**`conflictBehavior=fail` 首次上传保护** (R3):
+
+这是 reviewer 发现的最关键的并发漏洞。双设备同时初始化同步时，两者的第一次上传都 rev 为空。原实现使用 `conflictBehavior=replace`，导致第二个上传静默覆盖第一个。修复为 `conflictBehavior=fail`，让第二个上传感知到"文件已存在"并重试。
+
+详见 [review 经验教训：问题 #9](./review-lessons-learned.md#问题-9-首次创建上传需-conflictbehaviorfail)。
+
+**`?? false` + NgRx reducer 展开交互** (R4):
+
+`updateSettingsFromForm` 中用 `?? false` 处理可选布尔值，导致每次保存都覆盖已有的 `true`。根因是 NgRx reducer 的 `{...oldSection, ...normalizedCfg}` —— key 存在就覆盖，不管值是不是 `undefined`。修复为条件展开：`...(val !== undefined ? { key: val } : {})`。
+
+这是整个 PR 讨论最多的问题，演化过程：原始解构 → 显式字面量 → `?? false`（第 6 轮，更危险）→ 条件展开（第 9 轮最终方案）。
+
+详见 [review 经验教训：问题 #4](./review-lessons-learned.md#问题-4--false-对可选布尔值的破坏)。
+
+**凭证身份三元组检测** (R3 + R7):
+
+OAuth token 绑定到 `(useCustomApp, clientId, tenantId)` 三元组。切换 Azure AD 应用身份时必须原子性清除旧 token。只比较一个字段不够——用户可能从官方应用切换到自建应用。
+
+详见 [review 经验教训：问题 #6](./review-lessons-learned.md#问题-6-切换-azure-ad-应用身份时旧-token-未清除)。
+
+### 11.3 对现有并发模型的影响
+
+好消息是 OneDrive 的并发模式完全是共享层（FileBasedSyncAdapterService）的，不引入新的并发原语。所有并发保护：
+
+- 上传冲突重试（`_uploadWithMismatchFallback`）
+- LWW 重上传循环（最多 3 次）
+- syncVersion 乐观锁比较
+- 同步周期锁（`_isSyncing`）
+
+这些对所有 file-based provider（Dropbox、WebDAV、Nextcloud、LocalFile、OneDrive）统一生效，不需要 per-provider 实现。
+
+| 特性     | Dropbox    | OneDrive      | WebDAV     | LocalFile   | Nextcloud  |
+| -------- | ---------- | ------------- | ---------- | ----------- | ---------- |
+| 认证方式 | OAuth      | OAuth PKCE    | 用户名密码 | 无          | 用户名密码 |
+| 存储位置 | App folder | App folder    | 自定义路径 | 本地文件    | 自定义路径 |
+| 乐观锁   | rev (ETag) | ETag          | ETag       | syncVersion | ETag       |
+| 冲突解决 | 共享层 LWW | 共享层 LWW    | 共享层 LWW | 共享层 LWW  | 共享层 LWW |
+| 操作同步 | 共享适配器 | 共享适配器    | 共享适配器 | 共享适配器  | 共享适配器 |
+| 首次上传 | -          | conflict=fail | -          | -           | -          |
 
 **所有文件类 Provider 的同步逻辑完全相同，区别只在认证和文件传输。**
