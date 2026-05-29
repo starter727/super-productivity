@@ -228,11 +228,11 @@ interface FileBasedSyncData {
 
 ### 3.3 平台差异
 
-| 平台        | 回调方式                                        | 回退方案 |
-| ----------- | ----------------------------------------------- | -------- |
-| Electron    | 协议处理器 `superproductivity://oauth?code=...` | 手动粘贴 |
-| Web         | 页面重定向                                      | 手动粘贴 |
-| iOS/Android | 系统浏览器跳转 (⚠️ 未测)                        | 手动粘贴 |
+| 平台        | 回调方式                                                                 | 回退方案 |
+| ----------- | ------------------------------------------------------------------------ | -------- |
+| Electron    | 协议处理器 `superproductivity://oauth-callback/onedrive?code=...`        | 手动粘贴 |
+| Web         | `nativeclient` (显示授权码，用户手动粘贴)                                | —        |
+| iOS/Android | `nativeclient` 手动粘贴 (⚠️ 未真机测；HTTP 层未接 Capacitor native HTTP) | —        |
 
 ### 3.4 OAuth State 安全
 
@@ -483,7 +483,7 @@ OAuth token 绑定到 `(useCustomApp, clientId, tenantId)` 三元组。切换 Az
 - ✅ Windows → Linux 桌面端同步
 - ✅ OAuth PKCE 完整流程
 - ✅ Token 刷新
-- ❌ 移动端 (iOS/Android)
+- ❌ 移动端 (iOS/Android) — 代码已开放 (`IS_ONEDRIVE_SUPPORTED` 含 `IS_NATIVE_PLATFORM`)，但仅支持手动粘贴授权码，且 HTTP 层未接 Capacitor native HTTP
 - ❌ 多设备并发编辑冲突
 
 ---
@@ -516,7 +516,7 @@ OAuth token 绑定到 `(useCustomApp, clientId, tenantId)` 三元组。切换 Az
 ## 11. 已知限制
 
 1. **无官方 Client ID**：每个用户需自建 Azure AD 应用
-2. **移动端未测**：iOS/Android WebView 的 OAuth 回调未验证
+2. **移动端未真机测**：代码已开放给 iOS/Android (`IS_NATIVE_PLATFORM`)，但授权码流程仅支持手动粘贴（redirect 为 `nativeclient`），且 HTTP 层未使用 Capacitor native HTTP（无重试/网络韧性）
 3. **单文件同步**：所有数据在 1 个 JSON 文件中，大文件效率低
 4. **无即时推送**：基于多源触发的勤同步（非 WebSocket push），非 file-based provider 场景无定时器轮询
 
@@ -527,7 +527,7 @@ OAuth token 绑定到 `(useCustomApp, clientId, tenantId)` 三元组。切换 Az
 | 问题                                                        | 严重程度  | 后续状态                  |
 | ----------------------------------------------------------- | --------- | ------------------------- |
 | `syncFolderPath` 变更时文件夹缓存未失效                     | Important | 待修复                    |
-| Web 构建 `nativeclient` redirect URI 兼容性                 | Important | 需真机验证                |
+| Web/Mobile 构建 `nativeclient` redirect URI 兼容性          | Important | 需真机验证                |
 | Token 401 重试与 Dropbox 不对称                             | Important | 待优化                    |
 | 用户文件夹路径出现在日志中                                  | Minor     | 待脱敏                    |
 | `getFileRev` vs `downloadFile` rev fallback 不一致          | Minor     | 待统一                    |
@@ -539,6 +539,7 @@ OAuth token 绑定到 `(useCustomApp, clientId, tenantId)` 三元组。切换 Az
 | Electron IPC listener 未在 `ngOnDestroy` 中移除             | Minor     | 待修复                    |
 | 重复的 Formly 控件定义（`syncInterval`/`isManualSyncOnly`） | Minor     | 待清理                    |
 | Token 端点错误 body 脱敏不完整（`code_verifier`/`code`）    | Minor     | 待修复                    |
+| 移动端 HTTP 未接 Capacitor native HTTP（无重试/网络韧性）   | Important | 待优化                    |
 
 详见 [Review 经验教训](./review-lessons-learned.md#reviewer-后续)。
 

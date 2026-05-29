@@ -561,11 +561,11 @@ private async _clearIfConfigMatches(cfg: Partial<OneDrivePrivateCfg>): Promise<v
 
 ## 8. 平台差异全景
 
-| 平台        | OAuth Redirect URI                                             | State 校验       | 代码获取方式                              | Token 存储         |
-| ----------- | -------------------------------------------------------------- | ---------------- | ----------------------------------------- | ------------------ |
-| Electron    | `superproductivity://oauth-callback/onedrive`                  | ✓ 协议处理器回调 | IPC 自动接收                              | `safeStorage` 加密 |
-| Web         | `https://login.microsoftonline.com/common/oauth2/nativeclient` | 仅手动粘贴时     | 手动粘贴                                  | `sessionStorage`   |
-| iOS/Android | `superproductivity://oauth-callback`                           | ✓ URL listener   | Capacitor `App.addListener('appUrlOpen')` | Capacitor 加密存储 |
+| 平台        | OAuth Redirect URI                                             | State 校验       | 代码获取方式 | Token 存储         |
+| ----------- | -------------------------------------------------------------- | ---------------- | ------------ | ------------------ |
+| Electron    | `superproductivity://oauth-callback/onedrive`                  | ✓ 协议处理器回调 | IPC 自动接收 | `safeStorage` 加密 |
+| Web         | `https://login.microsoftonline.com/common/oauth2/nativeclient` | 仅手动粘贴时     | 手动粘贴     | `sessionStorage`   |
+| iOS/Android | `https://login.microsoftonline.com/common/oauth2/nativeclient` | 仅手动粘贴时     | 手动粘贴     | Capacitor 加密存储 |
 
 ### 8.1 Electron 特殊处理
 
