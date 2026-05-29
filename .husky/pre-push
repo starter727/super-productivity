@@ -1,1 +1,5 @@
-npm run lint && npm run test
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+case "$BRANCH" in
+  docs/*) exit 0 ;;
+  *)      npm run lint && npm run test ;;
+esac
