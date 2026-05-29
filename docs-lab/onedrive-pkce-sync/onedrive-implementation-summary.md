@@ -354,7 +354,7 @@ Headers: If-Match: "expected-etag"
 │ ⚫ 已授权 / ⚪ 需要授权 / 🔒 已加密 │
 └────────────────────────────────────────────┘
 
-````
+```
 
 ### 6.2 官方 Client ID 机制
 
@@ -396,16 +396,18 @@ OneDrive 同步在一个多层并发保护下运行。以下机制是经过 9 �
 ### 8.1 并发控制全景
 
 ```
+
 ┌─────────────────────────────────────────────────┐
-│ 1. Token 刷新层    → 单飞锁                      │
-│ 2. 文件传输层      → ETag + If-Match (HTTP 412)  │
-│ 3. 内容同步层      → syncVersion 乐观锁           │
-│ 4. 首次创建层      → conflictBehavior=fail        │
-│ 5. 配置保存层      → _lastSettings 去重 + 条件展开 │
-│ 6. 凭证管理层      → 三重身份匹配                  │
-│ 7. 同步周期层      → _isSyncing 全局锁            │
+│ 1. Token 刷新层 → 单飞锁 │
+│ 2. 文件传输层 → ETag + If-Match (HTTP 412) │
+│ 3. 内容同步层 → syncVersion 乐观锁 │
+│ 4. 首次创建层 → conflictBehavior=fail │
+│ 5. 配置保存层 → \_lastSettings 去重 + 条件展开 │
+│ 6. 凭证管理层 → 三重身份匹配 │
+│ 7. 同步周期层 → \_isSyncing 全局锁 │
 └─────────────────────────────────────────────────┘
-```
+
+````
 
 ### 8.2 Token 单飞锁
 
@@ -428,7 +430,7 @@ async _refreshAccessTokenIfNeeded(): Promise<void> {
     this._isRefreshingToken = false;
   }
 }
-```
+````
 
 ### 8.3 上传冲突处理（双层乐观锁）
 
@@ -437,6 +439,7 @@ async _refreshAccessTokenIfNeeded(): Promise<void> {
 **第二层 — 传输层 ETag**: OneDrive 使用 HTTP `If-Match` 头。412 响应表示远端已被其他设备更新。
 
 412 后的处理 (`_uploadWithMismatchFallback`):
+
 1. 重新下载最新的 sync-data.json
 2. 比较 ETag：变了 → 合并后重试（最多 2 次）；没变 → 服务端时钟偏差，强制覆盖
 3. 重试仍失败 → 抛出异常，下次同步周期再处理
@@ -517,13 +520,43 @@ OAuth token 绑定到 `(useCustomApp, clientId, tenantId)` 三元组。切换 Az
 3. **单文件同步**：所有数据在 1 个 JSON 文件中，大文件效率低
 4. **无即时推送**：基于多源触发的勤同步（非 WebSocket push），非 file-based provider 场景无定时器轮询
 
+### 11.1 Review 中暴露的已知问题
+
+以下问题在 PR review 中被标注，但 merge 时未完全解决，作为后续跟进项：
+
+| 问题                                                        | 严重程度  | 后续状态                  |
+| ----------------------------------------------------------- | --------- | ------------------------- |
+| `syncFolderPath` 变更时文件夹缓存未失效                     | Important | 待修复                    |
+| Web 构建 `nativeclient` redirect URI 兼容性                 | Important | 需真机验证                |
+| Token 401 重试与 Dropbox 不对称                             | Important | 待优化                    |
+| 用户文件夹路径出现在日志中                                  | Minor     | 待脱敏                    |
+| `getFileRev` vs `downloadFile` rev fallback 不一致          | Minor     | 待统一                    |
+| `_cfgOrError(requireAuth)` 死参数                           | Minor     | 待清理                    |
+| 测试覆盖缺口（CSRF、并发 refresh、412 映射）                | Minor     | 待补充                    |
+| Electron deep-link 对非 OneDrive provider 无 state 绑定     | Important | 待修复                    |
+| `_parseOAuthCallback` 默认 fallback 到 Dropbox              | Minor     | 已修复 (改为 `'unknown'`) |
+| `OAuthCallbackData.provider` 与 `SyncProviderId` enum 分叉  | Minor     | 待统一                    |
+| Electron IPC listener 未在 `ngOnDestroy` 中移除             | Minor     | 待修复                    |
+| 重复的 Formly 控件定义（`syncInterval`/`isManualSyncOnly`） | Minor     | 待清理                    |
+| Token 端点错误 body 脱敏不完整（`code_verifier`/`code`）    | Minor     | 待修复                    |
+
+详见 [Review 经验教训](./review-lessons-learned.md#reviewer-后续)。
+
 ---
 
 ## 12. 相关资源
 
+### 外部参考
+
 - [Microsoft Graph API - Drive](https://learn.microsoft.com/en-us/graph/api/resources/drive)
 - [Microsoft Identity - PKCE](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)
 - [OAuth 2.1 草案](https://datatracker.ietf.org/doc/draft-ietf-oauth-v2-1/)
-- [Super Productivity Sync Architecture](../docs/sync-and-op-log/)
-- [PR Review Lessons Learned](./review-lessons-learned.md) — 9 轮 review 中踩过的坑和总结```
-````
+- [Super Productivity Sync Architecture](../../docs/sync-and-op-log/)
+
+### 本系列文档
+
+- [OAuth PKCE 认证深入](./oauth-pkce-auth-deep-dive.md) — code_verifier / challenge、state CSRF、token 刷新、凭证清除、平台差异
+- [FileSyncProvider 集成指南](./filesync-provider-integration-guide.md) — 新增 Provider 的逐步实现清单
+- [同步架构详解](./sync-architecture-deep-dive.md) — op-log、向量时钟、冲突解决、适配器层
+- [PR Review 经验教训](./review-lessons-learned.md) — 39 个 review 发现的问题及修复
+- [同步方案选型评审](./sync-tech-selection-review.md) — 操作日志 vs 全状态快照 vs CRDT

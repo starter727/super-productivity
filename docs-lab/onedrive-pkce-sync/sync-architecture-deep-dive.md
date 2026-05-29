@@ -2016,7 +2016,7 @@ SuperSync 有专门的同步服务器，可以存储和查询操作。文件类 
 
 ## 11. OneDrive PR Review 验证的并发模式
 
-> 2026 年 5 月 OneDrive PR (#7523) 经历了 9 轮 review。以下是在 review 中被验证或纠正的并发控制模式。完整记录见 [review 经验教训总结](./review-lessons-learned.md)。
+> 2026 年 5 月 OneDrive PR (#7523) 经历了 7 轮 PR conversation comment + 2 轮正式 review。以下是在 review 中被验证或纠正的并发控制模式。完整记录（共 39 个问题）见 [review 经验教训总结](./review-lessons-learned.md)。
 
 ### 11.1 Review 验证通过的设计
 
@@ -2049,6 +2049,38 @@ SuperSync 有专门的同步服务器，可以存储和查询操作。文件类 
 OAuth token 绑定到 `(useCustomApp, clientId, tenantId)` 三元组。切换 Azure AD 应用身份时必须原子性清除旧 token。只比较一个字段不够——用户可能从官方应用切换到自建应用。
 
 详见 [review 经验教训：问题 #6](./review-lessons-learned.md#问题-6-切换-azure-ad-应用身份时旧-token-未清除)。
+
+**Refresh-token 端点错误不清除凭证** (Review #1):
+
+`_requestOAuthToken` 在 `400 invalid_grant` 时抛通用 `HttpNotOkAPIError`，坏掉的 refresh_token 永远不清除，导致无限循环失败。Reviewer 标注为 Critical。修复后检测 token 端点的 `400/401` + `error: "invalid_grant"` 并调用 `clearAuthCredentials()`。
+
+详见 [review 经验教训：问题 #11](./review-lessons-learned.md#问题-11-refresh-token-端点错误不清除凭证)。
+
+**clearAuthCredentials() 与 in-flight refresh 竞态** (Review #1 + #2):
+
+`_refreshAccessTokenIfNeeded` 闭包捕获 `cfg`，成功后用捕获的旧 cfg 调用 `setComplete`，可能覆盖并发的 `clearAuthCredentials()` 结果。Reviewer 在第二轮进一步指出修复后的注释过度承诺。风险低但实际存在微任务级 TOCTOU 窗口。
+
+详见 [review 经验教训：问题 #12](./review-lessons-learned.md#问题-12-clearauthcredentials-与-in-flight-refresh-竞态)。
+
+**文件夹缓存未随 syncFolderPath 变化失效** (Review #1):
+
+`_ensuredFolderPath` 只在 404 时置空，用户修改路径后缓存仍指向旧路径。详见 [review 经验教训：问题 #19](./review-lessons-learned.md#问题-19-文件夹缓存未随-syncfolderpath-变化失效)。
+
+**文件夹存在性探测吞掉非 404 失败** (C6):
+
+Folder probe 的 catch 捕获了所有失败（429、5xx、认证错误）并回退到创建逻辑。只应对 404 回退，其他错误原样抛出。详见 [review 经验教训：问题 #38](./review-lessons-learned.md#问题-38-文件夹存在性探测吞掉非-404-失败)。
+
+**`_is401Retry` 实例布尔值与并发请求竞态** (C1):
+
+`maxConcurrentRequests=4` 与实例级 `_is401Retry` 标志竞态——请求 A 在重试中，请求 B 看到标志为 true 就被踢出登录。修复为 per-call `isRetry` 参数。详见 [review 经验教训：问题 #21](./review-lessons-learned.md#问题-21-_is401retry-实例布尔值与-maxconcurrentrequests4-竞态)。
+
+**`_ensureSyncFolderExists` 对文件夹 POST 使用 `conflictBehavior: replace`** (C1):
+
+如果父级有同名文件，Graph 会用文件夹替换它（数据丢失）。修复为 `'fail'` 并保留 409 swallow。详见 [review 经验教训：问题 #24](./review-lessons-learned.md#问题-24-_ensuresyncfolderexists-对文件夹-post-使用-conflictbehavior-replace)。
+
+**`_requestOAuthToken` 吞掉自己刚抛出的 `MissingRefreshTokenAPIError`** (C1 + C2):
+
+`throw` 和 `JSON.parse` 在同一个 `try` 块内，catch 吞掉了正确类型的错误，调用方看到泛型 `HttpNotOkAPIError`。修复为只把 `JSON.parse` 放进 try。详见 [review 经验教训：问题 #22](./review-lessons-learned.md#问题-22-_requestoauthtoken-吞掉了自己刚抛出的-missingrefreshtokenapierror)。
 
 ### 11.3 对现有并发模型的影响
 
