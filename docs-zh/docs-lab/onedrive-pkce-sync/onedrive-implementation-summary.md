@@ -304,6 +304,8 @@ Headers: Accept: application/json
 
 `FileBasedSyncAdapterService` 在同步周期内缓存下载结果（TTL 30s），避免 `_uploadOps` 和 `_downloadOps` 各下载一次导致重复 API 调用。
 
+`listFiles()` 分页后续经过加固（#7800）：传递 `@odata.nextLink` 绝对 URL 以支持主权云（如 `graph.microsoft.de`），由 HTTPS + Microsoft Graph 主机白名单守卫防止恶意重定向泄露 Bearer token，并设置 500 页硬上限防止无限循环。
+
 ### 5.3 上传冲突保护
 
 双层乐观锁机制：
@@ -339,8 +341,10 @@ Headers: If-Match: "expected-etag"
 
 ┌─ Sync Provider ───────────────────────────┐
 │ ○ None ○ SuperSync ○ Dropbox │
-│ ○ WebDAV ○ LocalFile ○ Nextcloud │
-│ ● OneDrive │
+│ ○ Nextcloud │
+│ ● OneDrive (experimental) │
+│ │
+│ ℹ️ 仅桌面/移动端可用，浏览器不支持     │
 ├────────────────────────────────────────────┤
 │ [OneDrive 配置] │
 │ │
@@ -378,6 +382,7 @@ Headers: If-Match: "expected-etag"
 | 文件未找到 | 404       | 首次同步，创建新文件             |
 | 版本冲突   | 412       | 重新下载 → 合并 → 重试           |
 | 限流       | 429       | `Retry-After` 头等待后重试       |
+| OAuth 状态无效 | 400  | 显示翻译后的 snack "OAuth 状态无效"（不记录敏感数据） |
 | 网络错误   | -         | 最多重试 2 次                    |
 
 ### 7.2 \_mapAndThrow()
@@ -393,7 +398,7 @@ Headers: If-Match: "expected-etag"
 
 ## 8. 并发控制机制
 
-OneDrive 同步在一个多层并发保护下运行。以下机制是经过 9 轮 code review 逐一验证的核心安全网。
+OneDrive 同步在一个多层并发保护下运行。以下机制在 9 轮 code review 中被仔细审查，期间发现并修复了多个并发缺陷（见 [review 经验教训](./review-lessons-learned.md)）。
 
 ### 8.1 并发控制全景
 
@@ -406,7 +411,8 @@ OneDrive 同步在一个多层并发保护下运行。以下机制是经过 9 �
 │ 4. 首次创建层 → conflictBehavior=fail │
 │ 5. 配置保存层 → \_lastSettings 去重 + 条件展开 │
 │ 6. 凭证管理层 → 三重身份匹配 │
-│ 7. 同步周期层 → \_isSyncing 全局锁 │
+│ 7. 同步周期层 → _isSyncing 全局锁 │
+│ 8. 空状态守卫层 → hasMeaningfulStateData() 跳过空状态快照/压缩 │
 └─────────────────────────────────────────────────┘
 
 ````
@@ -482,11 +488,11 @@ OAuth token 绑定到 `(useCustomApp, clientId, tenantId)` 三元组。切换 Az
 
 ### 8.2 手动集成测试
 
-- ✅ Windows → Linux 桌面端同步
-- ✅ OAuth PKCE 完整流程
-- ✅ Token 刷新
-- ❌ 移动端 (iOS/Android) — 代码已开放 (`IS_ONEDRIVE_SUPPORTED` 含 `IS_NATIVE_PLATFORM`)，但仅支持手动粘贴授权码，且 HTTP 层未接 Capacitor native HTTP
-- ❌ 多设备并发编辑冲突
+- ✅ Windows → Linux 桌面端同步（基础流程测试通过）
+- ✅ OAuth PKCE 完整流程（基础流程测试通过）
+- ✅ Token 刷新（基础流程测试通过）
+- ❌ 移动端 (iOS/Android) — 代码已开放，但仅支持手动粘贴授权码，未真机验证
+- ❌ 多设备并发编辑冲突 — 未系统测试
 
 ---
 
@@ -518,9 +524,10 @@ OAuth token 绑定到 `(useCustomApp, clientId, tenantId)` 三元组。切换 Az
 ## 11. 已知限制
 
 1. **无官方 Client ID**：每个用户需自建 Azure AD 应用
-2. **移动端未真机测**：代码已开放给 iOS/Android (`IS_NATIVE_PLATFORM`)，但授权码流程仅支持手动粘贴（redirect 为 `nativeclient`），且 HTTP 层未使用 Capacitor native HTTP（无重试/网络韧性）
-3. **单文件同步**：所有数据在 1 个 JSON 文件中，大文件效率低
-4. **无即时推送**：基于多源触发的勤同步（非 WebSocket push），非 file-based provider 场景无定时器轮询
+2. **仅桌面/移动端**：OneDrive 同步仅在 Electron 桌面和 Capacitor 移动端应用可用，Web 浏览器版本不可用（`IS_ONEDRIVE_SUPPORTED = IS_ELECTRON || IS_NATIVE_PLATFORM`）
+3. **移动端未真机测**：代码已开放给 iOS/Android (`IS_NATIVE_PLATFORM`)，但授权码流程仅支持手动粘贴（redirect 为 `nativeclient`），且 HTTP 层未使用 Capacitor native HTTP（无重试/网络韧性）
+4. **单文件同步**：所有数据在 1 个 JSON 文件中，大文件效率低
+5. **无即时推送**：基于多源触发的勤同步（非 WebSocket push），非 file-based provider 场景无定时器轮询
 
 ### 11.1 Review 中暴露的已知问题
 

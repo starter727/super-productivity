@@ -563,11 +563,14 @@ private async _clearIfConfigMatches(cfg: Partial<OneDrivePrivateCfg>): Promise<v
 
 ## 8. 平台差异全景
 
+> **重要**：OneDrive 同步在 Web/浏览器版本中**完全不可用**。`IS_ONEDRIVE_SUPPORTED = IS_ELECTRON || IS_NATIVE_PLATFORM` 守卫使得 OneDrive provider 在 Web 构建中不会被注册，配置表单中也不会出现该选项。以下内容仅适用于桌面（Electron）和移动端（Capacitor）。
+
 | 平台        | OAuth Redirect URI                                             | State 校验       | 代码获取方式 | Token 存储         |
 | ----------- | -------------------------------------------------------------- | ---------------- | ------------ | ------------------ |
 | Electron    | `superproductivity://oauth-callback/onedrive`                  | ✓ 协议处理器回调 | IPC 自动接收 | `safeStorage` 加密 |
-| Web         | `https://login.microsoftonline.com/common/oauth2/nativeclient` | 仅手动粘贴时     | 手动粘贴     | `sessionStorage`   |
 | iOS/Android | `https://login.microsoftonline.com/common/oauth2/nativeclient` | 仅手动粘贴时     | 手动粘贴     | Capacitor 加密存储 |
+
+> Web 行已从上表中移除，因为 OneDrive 在 Web 上不可用。
 
 ### 8.1 Electron 特殊处理
 
@@ -587,11 +590,14 @@ Deeplink 重定向:
   - 拒绝时不记录完整 URL (只记录 scheme)
 ```
 
-### 8.2 Web 构建 nativeclient 问题
+### 8.2 `IS_ONEDRIVE_SUPPORTED` 守卫
 
-**Review #1 发现**: Web 构建使用 `https://login.microsoftonline.com/common/oauth2/nativeclient` 作为 redirect URI。这是 Microsoft 的固定 URI，适用于 "Mobile and desktop applications" 类型的 Entra 应用注册。但如果用户注册的应用类型是 "Web" 或 "SPA"，Entra 会拒绝此 URI (AADSTS50011)。
+OneDrive 在 Web 上不可用（见上方 8.1 注）。这一限制由 `IS_ONEDRIVE_SUPPORTED = IS_ELECTRON || IS_NATIVE_PLATFORM` 控制，影响两个层面：
 
-**影响**: 需要用户注册正确类型的 Azure AD 应用，或在文档中说明。
+- **Provider 注册**（`sync-providers.factory.ts`）：Web 构建中 OneDrive 不会被实例化
+- **UI 可见性**（`sync-form.const.ts`）：Web 上同步配置下拉不显示 OneDrive 选项
+
+这在代码中并非事后补救——是一开始就设计好的约束，因为 OAuth PKCE 流程依赖 Electron 的协议处理器或移动端的 WebView 回调来安全接收授权码。
 
 ### 8.3 \_getRedirectUri()
 
@@ -700,7 +706,7 @@ SyncProviderAuthHelper                       OneDrive._exchangeAuthCode
 | OAuth 回调 URL 通过 `SyncLog.log` 暴露 code + state (Review #1)                           | Important | ✅ 已修复 (移除第二个参数)          |
 | `_normalizeAuthCodeInput` regex 接受任意含 `code=` 的输入 — PKCE 保护但不明显 (Review #1) | Minor     | ⚠️ 已加注释说明                     |
 | `OAUTH_STATES_MAP` 模块级变量的内存泄漏 (Review #1)                                       | Minor     | ⚠️ 有界泄漏 (10min TTL)，实践中无害 |
-| Web 构建 `nativeclient` URI 可能与 Entra 应用类型不匹配 (Review #1)                       | Important | ⚠️ 需文档说明或真机验证             |
+| Web 中 OneDrive 不可用 — `IS_ONEDRIVE_SUPPORTED` 守卫阻止注册 (见 §8.1)                 | N/A       | 设计即如此                         |
 | 用户输入的文件夹名出现在日志中 (Review #1)                                                | Minor     | ⚠️ 已改造 (只记录状态码)            |
 | 切换 Azure AD 应用身份时旧 token 未清除 (R7)                                              | 阻塞      | ✅ 已修复 (三重身份匹配)            |
 
@@ -720,9 +726,8 @@ SyncProviderAuthHelper                       OneDrive._exchangeAuthCode
 
 ```
 原因: redirect URI 与应用注册类型不匹配
-出现场景: Web 构建 + "Web/SPA" 类型的 Entra 应用 + nativeclient URI
-解决: 注册 "Mobile and desktop applications" 类型的 Azure AD 应用
-     或在 _getRedirectUri() 中使用自定义 redirect URI
+出现场景: 桌面/移动端使用的 redirect URI 与 Entra 应用注册类型不符
+解决: 在 Azure AD 中注册 "Mobile and desktop applications" 类型的应用
 ```
 
 ### 12.3 "state validation failed" 错误

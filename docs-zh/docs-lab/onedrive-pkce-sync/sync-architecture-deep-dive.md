@@ -59,7 +59,7 @@
                            (傻管道)    (傻管道)   (傻管道)   (傻管道)   (傻管道)
 ```
 
-**关键分层原则：** 同步智能（冲突检测、向量时钟、操作回放）全部在共享层实现，存储 Provider 只负责读写一个字符串文件。
+**关键分层原则：** 同步智能（冲突检测、向量时钟、操作回放）全部在共享层实现。从架构视角看，存储 Provider 是 string-in/string-out 的传输层——实际还需处理认证、令牌生命周期、错误映射和 ETag 管理（OneDrive 实现约 770 行）。
 
 ---
 
@@ -210,6 +210,10 @@ interface Operation {
 启动 → 从 state_cache 加载最近的状态快照
      → 回放快照之后的 "tail" 操作
      → 定期压缩（每 500 ops 创建新快照，清理已同步的旧操作）
+        但压缩有前提：当前 NgRx 状态必须包含用户数据
+        （hasMeaningfulStateData() 守卫，见 #7892）。
+        如果状态因瞬时故障退化/为空，压缩跳过——
+        宁可 op-log 变长，也不允许空状态覆盖缓存。
 ```
 
 ---
@@ -982,6 +986,10 @@ ConflictResolutionService.autoResolveConflictsLWW(conflicts, nonConflictingOps):
   → LESS_THAN 或 EQUAL → 手机直接应用，冲突彻底解决！
 ```
 
+**LWW 部分 payload 的特殊情况（#7876）：**
+
+上面假设 LWW update 携带完整实体状态。实际中可能出现**部分 payload**——比如远程操作只改了 `title`，没带 `projectId`。此时 LWW meta-reducer 不会让 recreated task 成为孤儿：`projectId` 自动 fallback 到 `INBOX_PROJECT`，task id 被加入 `INBOX.project.taskIds`。子任务状态也正交处理——从子任务提升为根任务会触发 `taskIds` 添加，变为子任务则触发删除。这确保 LWW 重建的 task 永远有合法的 project 归属。
+
 ---
 
 ### 5.6 阶段 5 详解：上传本地操作 — uploadPendingOps()
@@ -1420,7 +1428,7 @@ B 的处理：
      → processRemoteOps() 应用到本地
      → uploadPendingOps() 把 B 的操作合并后重新上传
 
-  乐观锁保证了"两个并发上传不会互相覆盖"——总会有一个失败并重试。
+  乐观锁确保两个并发上传在正常情况下不会互相覆盖——一个检测到版本不匹配后会失败并重试。该机制的正确性经过 code review 验证。
 ```
 
 #### 5.8.4 所有故障汇总
@@ -1435,9 +1443,11 @@ B 的处理：
 | Token 过期             | 否         | 刷新 token 后重试（单飞锁防并发刷新） | 无（自动恢复）         |
 | OneDrive 限流 (429)    | 否         | Retry-After 等待后重试                | 可能稍慢               |
 | sync-data.json 过大    | 否         | 下次同步重试（压缩后通常 < 限制）     | 可能持续失败           |
+| 状态缓存损坏但 op-log 完好             | 否 | Hydrator 检测 lastSeq > 0，丢弃损坏快照，从头重放操作日志 | 启动较慢但数据不丢 |
+| 状态退化/为空（瞬时故障后）             | 否 | hasMeaningfulStateData() 守卫阻止空状态覆盖缓存和 compaction | 无（自动恢复） |
 | 本地 IndexedDB 损坏    | 部分       | 从远端重新下载完整状态                | 本地未同步数据可能丢失 |
 
-**核心保证：只要操作还在 IndexedDB 里且 synced=false，同步系统就不会放弃它。**
+**操作留存原则：只要操作还在 IndexedDB 里且 synced=false，同步系统就会持续重试上传。** 但此前提是 IndexedDB 本身未损坏——若存储层损坏，上表对应行适用。
 
 ---
 
@@ -2103,5 +2113,8 @@ Folder probe 的 catch 捕获了所有失败（429、5xx、认证错误）并回
 | 冲突解决 | 共享层 LWW | 共享层 LWW    | 共享层 LWW | 共享层 LWW  | 共享层 LWW |
 | 操作同步 | 共享适配器 | 共享适配器    | 共享适配器 | 共享适配器  | 共享适配器 |
 | 首次上传 | -          | conflict=fail | -          | -           | -          |
+| 平台支持 | 全平台     | 仅桌面/移动端 | 全平台     | 全平台     | 全平台     |
 
-**所有文件类 Provider 的同步逻辑完全相同，区别只在认证和文件传输。**
+> OneDrive 在 Web 浏览器中不可用（`IS_ONEDRIVE_SUPPORTED = IS_ELECTRON || IS_NATIVE_PLATFORM`）。
+
+**所有文件类 Provider 的同步逻辑完全相同，区别只在认证、平台支持和文件传输。**
