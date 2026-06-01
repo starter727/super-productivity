@@ -1,3 +1,5 @@
+# 文件同步提供者集成指南
+
 # FileSyncProvider Integration Guide
 
 > 逐步指南：如何为 Super Productivity 新增文件同步 Provider（以 OneDrive 为例，覆盖接口、表单、认证、错误处理、测试）。

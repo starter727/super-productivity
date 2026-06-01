@@ -1,3 +1,5 @@
+# OAuth PKCE 认证深度解析
+
 # OAuth PKCE 认证深入
 
 > 以 OneDrive 为切入点，详解 Super Productivity 的 OAuth 2.0 PKCE 认证实现，涵盖 code_verifier 生成、state CSRF 防护、平台差异、token 生命周期管理及并发控制。
