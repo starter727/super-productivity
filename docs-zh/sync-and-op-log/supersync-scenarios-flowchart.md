@@ -106,7 +106,7 @@ flowchart TD
 
 **备注：**
 
-- `Enter Password` 与 `Decrypt Error` 分别对应 `DecryptNoPasswordError` 与 `DecryptError`，是不同组件，选项不同。
-- `Encryption-only change` 旁路：当入站 SYNC_IMPORT 的 `syncImportReason === 'PASSWORD_CHANGED'` 且无有意义 pending ops 时，跳过冲突对话框（数据没变，只是加密状态变了）。
-- LWW 平局规则：时间戳相同 remote 胜（服务端权威）。`moveToArchive` 无论时间戳都胜出。
-- 重下载重试上限：每个实体最多 3 次（`MAX_CONCURRENT_RESOLUTION_ATTEMPTS`），超限后操作会被永久拒绝。
+- `Enter Password` 对话框对应 `DecryptNoPasswordError`，`Decrypt Error` 对话框对应 `DecryptError`——它们是不同的组件，选项不同。
+- `IMPORT_CONFLICT` 门禁仅使用 pending ops，不检查 store 内容（`_hasMeaningfulPendingOps()`）。无 pending ops 的 PASSWORD_CHANGED SYNC_IMPORT 自然通过此门禁静默接受——数据完全相同，仅加密状态改变。"Meaningful" = TASK/PROJECT/TAG/NOTE 的创建/更新/删除或全量状态 ops——仅配置修改不算。已同步的 store 数据不与传入的 SYNC_IMPORT 构成冲突——面向用户的警告在发起设备上显示。在门禁中包含 store 内容会让旧客户端选择 `USE_LOCAL` 并强制上传其过时的 pre-import 状态，为所有人回滚远程导入。
+- LWW 平局规则：时间戳相同则 remote 胜（服务端权威）。`moveToArchive` 操作无论时间戳都胜出。
+- 重下载重试上限：每个实体最多 3 次解算尝试（`MAX_CONCURRENT_RESOLUTION_ATTEMPTS`），超限后操作永久拒绝。

@@ -6,13 +6,13 @@
 
 ## 快速开始
 
-| 如果你想...         | 阅读这里                                                                       |
-| ------------------- | ------------------------------------------------------------------------------ |
-| 了解整体架构        | [operation-log-architecture.md](./operation-log-architecture.md)               |
-| 查看可视化图        | [diagrams/](./diagrams/)（按主题拆分）                                         |
-| 学习设计规则        | [operation-rules.md](./operation-rules.md)                                     |
-| 理解文件型同步      | [diagrams/04-file-based-sync.md](./diagrams/04-file-based-sync.md)             |
-| 理解 SuperSync 加密 | [supersync-encryption-architecture.md](./supersync-encryption-architecture.md) |
+| 如果你想...                                          | 阅读这里                                                                       |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------ |
+| 编写 effect/reducer/bulk-dispatch 时避免引入同步 bug | [contributor-sync-model.md](./contributor-sync-model.md) — 核心不变量          |
+| 了解整体架构                                         | [operation-log-architecture.md](./operation-log-architecture.md)               |
+| 查看可视化图                                         | [diagrams/](./diagrams/)（按主题拆分）                                         |
+| 学习设计规则                                         | [operation-rules.md](./operation-rules.md)                                     |
+| 理解 SuperSync 加密                                  | [supersync-encryption-architecture.md](./supersync-encryption-architecture.md) |
 
 ## 文档总览
 
@@ -143,13 +143,24 @@ src/app/op-log/
 └── validation/                     # Data validation and repair
 ```
 
+## 场景目录（预期行为）
+
+| 文档                                                                   | 说明                               |
+| ---------------------------------------------------------------------- | ---------------------------------- |
+| [supersync-scenarios.md](./supersync-scenarios.md)                     | 具体 SuperSync 场景 A–I 及预期行为 |
+| [supersync-scenarios-flowchart.md](./supersync-scenarios-flowchart.md) | SuperSync 场景的可视化决策树       |
+| [file-based-sync-flowchart.md](./file-based-sync-flowchart.md)         | 文件型 Provider 的可视化决策树     |
+
 ## 相关文档
 
 | 位置                                                             | 内容                 |
 | ---------------------------------------------------------------- | -------------------- |
 | [vector-clocks.md](./vector-clocks.md)                           | 向量时钟实现细节     |
 | [packages/super-sync-server/](../../packages/super-sync-server/) | SuperSync 服务端实现 |
+| [ARCHITECTURE-DECISIONS.md](../../ARCHITECTURE-DECISIONS.md)     | 关键产品/数据决策    |
 | [background-info/](./background-info/)                           | 研究资料与最佳实践   |
+
+> 历史设计笔记和已废弃的计划不作为文档保留；它们存在于 git 历史中（如需了解原理，请参考相关 commit）。
 
 ## 实现状态
 

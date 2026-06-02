@@ -14,7 +14,7 @@
 
 操作日志从根本上改变了应用对待数据的方式。我们不再把数据库当作一个“桶”来覆盖数据（例如“任务标题现在是 X”），而是将其视为一个**事件时间线**（例如“10:00 AM 时，用户将任务标题改为 X”）。
 
-- **真相源（Source of Truth）：** _日志_就是真相。应用的“当前状态”（你在屏幕上看到的）只是从头重放日志计算出来的结果。
+- **真相源（Source of Truth）：** *日志*就是真相。应用的“当前状态”（你在屏幕上看到的）只是从头重放日志计算出来的结果。
 - **不可变性（Immutability）：** 一旦操作被写入，它就永远不会被更改。我们只追加新操作。如果你“删除”一个任务，我们不会删除这一行；而是追加一个 \DELETE\ 操作。
 
 ### 1. 数据如何保存（写路径）
@@ -31,10 +31,10 @@
 
 ### 2. 数据如何加载（读路径）
 
-从开头重放_每一个_操作会太慢。我们使用**快照（Snapshot）**来加速：
+从开头重放*每一个*操作会太慢。我们使用**快照（Snapshot）**来加速：
 
 1.  **加载快照：** 启动时，应用加载最近的“保存点”（例如昨天保存的应用状态完整副本）。
-2.  **重放尾部：** 然后应用查询日志：“给我所有发生在此快照_之后_的操作。”
+2.  **重放尾部：** 然后应用查询日志：“给我所有发生在此快照*之后*的操作。”
 3.  **快进：** 将这几个“尾部”操作应用到快照上——至此应用完全更新。
 4.  **水合优化（Hydration Optimization）：** 如果刚刚发生了同步，我们可以直接加载新状态，完全跳过重放。
 
@@ -48,7 +48,7 @@
 - **交换：** 设备之间交换单个 \Operation\，而不是完整文件。这节省了大量带宽。
 - **冲突检测：** 因为每个操作都有一个**向量时钟（Vector Clock）**，我们可以从数学上证明两个变更是否同时发生。
   - _示例：_ 设备 A 发送“更新标题（版本 1 -> 2）”。设备 B 看到自己有“版本 1”，于是安全地应用该更新。
-  - _冲突：_ 如果设备 B _也_做了一个变更，且处于“版本 2”，它会知道“等等，我们俩同时改变了版本 1！” -> **检测到冲突**。
+  - _冲突：_ 如果设备 B *也*做了一个变更，且处于“版本 2”，它会知道“等等，我们俩同时改变了版本 1！” -> **检测到冲突**。
 - **解决：** 向用户展示对话框来选择胜出者。败方不会被删除；它会被标记为日志中的“已拒绝（Rejected）”，但保留历史记录。
 
 **B. “基于文件的同步”（Dropbox、WebDAV、本地文件）**
@@ -63,9 +63,9 @@
 
 系统假设数据损坏是不可避免的（断电、同步错误、宇宙射线），并建立防御措施：
 
-- **验证检查点：** 在_写入_磁盘前、从磁盘_加载_后以及_接收_同步数据后都会检查数据。
+- **验证检查点：** 在*写入*磁盘前、从磁盘*加载*后以及*接收*同步数据后都会检查数据。
 - **自动修复：** 如果状态无效（例如子任务指向不存在的父任务），应用不会崩溃。它会运行自动修复脚本（例如分离子任务）并生成一个特殊的 **\REPAIR\ 操作**。
-- **审计追踪：** 此 \REPAIR\ 操作被保存到日志中。这意味着你可以回溯，精确看到系统在_何时_以及_为何_自动修改了你的数据。
+- **审计追踪：** 此 \REPAIR\ 操作被保存到日志中。这意味着你可以回溯，精确看到系统在*何时*以及*为何*自动修改了你的数据。
 
 ### 5. 维护（压缩 Compaction）
 
@@ -80,12 +80,12 @@
 
 操作日志服务**四个不同的目的**：
 
-| 目的                      | 描述                                         | 状态          |
-| ------------------------- | -------------------------------------------- | ------------- |
-| **A. 本地持久化**         | 快速写入、崩溃恢复、事件溯源                 | 已完成 ✅     |
-| **B. 基于文件的同步**     | WebDAV/Dropbox/LocalFile 的单文件同步        | 已完成 ✅     |
-| **C. 服务器同步**         | 上传/下载单个操作（SuperSync）               | 已完成 ✅（单版本）¹ |
-| **D. 验证与修复**         | 防止损坏、自动修复无效状态                    | 已完成 ✅     |
+| 目的                  | 描述                                  | 状态                 |
+| --------------------- | ------------------------------------- | -------------------- |
+| **A. 本地持久化**     | 快速写入、崩溃恢复、事件溯源          | 已完成 ✅            |
+| **B. 基于文件的同步** | WebDAV/Dropbox/LocalFile 的单文件同步 | 已完成 ✅            |
+| **C. 服务器同步**     | 上传/下载单个操作（SuperSync）        | 已完成 ✅（单版本）¹ |
+| **D. 验证与修复**     | 防止损坏、自动修复无效状态            | 已完成 ✅            |
 
 > ¹ **跨版本同步限制：** Part C 对于相同 schema 版本的客户端已完成。跨版本同步（A.7.11）尚未实现——参见 A.7.11 冲突感知迁移策略了解防护措施。
 
@@ -94,53 +94,53 @@
 本文档围绕这四个目的组织。大部分复杂性在 **Part A**（本地持久化）中。**Part B** 处理通过 \FileBasedSyncAdapter\ 的基于文件的同步。**Part C** 处理通过 SuperSync 服务器的基于操作的同步。**Part D** 集成了验证和自动修复。
 
 \┌───────────────────────────────────────────────────────────────┐
-│                          用户操作                                │
+│ 用户操作 │
 └───────────────────────────────────────────────────────────────┘
-        │
-        │
-        ▼
-   ┌─────────────┐
-   │  NgRx Store │  （运行时真相源）
-   │  (1) 立即写入 │
-   └──────┬───────┘
-          │
-          │
-   ┌───────┬───────┐
-   │  快照缓存   │  （内存中——重启后重建）
-   └───────┬───────┘
-          │  (2) 持久化
-          │
-   ┌──────┬────────┐
-   │  SUP_OPS    │  （IndexedDB —— 不可变操作日志）
-   │  (ps.COMDB) │
-   └──────┬────────┘
-          │  (3) 同步
-   ┌────┬────────────────────────┐
-   │  同步提供者        │
-   │  ├── SuperSync（基于操作）│
-   │  └── WebDAV/Dropbox/Local│
-   │      （基于文件）        │
-   └──────────────────────────┘
+│
+│
+▼
+┌─────────────┐
+│ NgRx Store │ （运行时真相源）
+│ (1) 立即写入 │
+└──────┬───────┘
+│
+│
+┌───────┬───────┐
+│ 快照缓存 │ （内存中——重启后重建）
+└───────┬───────┘
+│ (2) 持久化
+│
+┌──────┬────────┐
+│ SUP_OPS │ （IndexedDB —— 不可变操作日志）
+│ (ps.COMDB) │
+└──────┬────────┘
+│ (3) 同步
+┌────┬────────────────────────┐
+│ 同步提供者 │
+│ ├── SuperSync（基于操作）│
+│ └── WebDAV/Dropbox/Local│
+│ （基于文件） │
+└──────────────────────────┘
 \
+
 ---
 
 ## 为什么选择此架构：被拒绝的备选方案
 
 在设计操作日志系统时，我们评估了几种替代方法，并因以下原因拒绝了它们：
 
-| 备选方案 | 拒绝原因 |
-| --------- | ------------ |
-| **增量状态转储** | 逐文件同步，仅将增量更改写入同步文件。在长时间离线后，可能没有足够的增量来安全应用；相反，快照 + 尾部操作模式更可靠。 |
-| **仅快照** | 丢弃操作历史；只有完整状态快照。同步变成最后写入者胜出。无法进行冲突检测。 |
-| **基于 git 的同步** | 每几秒提交至 git 仓库。对于频繁变更来说太慢且过于重量级。二进制 blob 压缩效果差。 |
-| **CRDT（无冲突复制数据类型）** | 学术上很优雅，但会增加显著的复杂性。向量时钟 + LWW（最后写入者胜出）达到 99% 的相同效果，且实现更简单。 |
+| 备选方案                       | 拒绝原因                                                                                                              |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| **增量状态转储**               | 逐文件同步，仅将增量更改写入同步文件。在长时间离线后，可能没有足够的增量来安全应用；相反，快照 + 尾部操作模式更可靠。 |
+| **仅快照**                     | 丢弃操作历史；只有完整状态快照。同步变成最后写入者胜出。无法进行冲突检测。                                            |
+| **基于 git 的同步**            | 每几秒提交至 git 仓库。对于频繁变更来说太慢且过于重量级。二进制 blob 压缩效果差。                                     |
+| **CRDT（无冲突复制数据类型）** | 学术上很优雅，但会增加显著的复杂性。向量时钟 + LWW（最后写入者胜出）达到 99% 的相同效果，且实现更简单。               |
 
 拒绝的备选方案的完整列表和详细理由在 [rejected-alternatives.md](./rejected-alternatives.md) 中（仓库历史记录）。
 
 ---
 
 ## Part A：本地持久化
-
 
 操作日志主要充当本地持久化的**预写日志（Write-Ahead Log, WAL）**。它提供：
 
@@ -152,24 +152,24 @@
 
 ### SUP_OPS 数据库
 
-`	ypescript
+` ypescript
 // ops 表 - 事件日志
 interface OperationLogEntry {
-  seq: number; // 自增主键
-  op: Operation; // 操作
-  appliedAt: number; // 本地应用时间
-  source: 'local' | 'remote';
-  syncedAt?: number; // 用于服务器同步（Part C）
-  rejectedAt?: number; // 冲突解决时被拒绝的时间
+seq: number; // 自增主键
+op: Operation; // 操作
+appliedAt: number; // 本地应用时间
+source: 'local' | 'remote';
+syncedAt?: number; // 用于服务器同步（Part C）
+rejectedAt?: number; // 冲突解决时被拒绝的时间
 }
 
 // state_cache 表 - 定期快照
 interface StateCache {
-  state: AllSyncModels; // 完整快照
-  lastAppliedOpSeq: number;
-  vectorClock: VectorClock; // 当前合并的向量时钟
-  compactedAt: number; // 此快照的创建时间
-  schemaVersion?: number; // 可选，用于向后兼容
+state: AllSyncModels; // 完整快照
+lastAppliedOpSeq: number;
+vectorClock: VectorClock; // 当前合并的向量时钟
+compactedAt: number; // 此快照的创建时间
+schemaVersion?: number; // 可选，用于向后兼容
 }
 `
 
@@ -177,20 +177,20 @@ interface StateCache {
 
 \\\
 ┌─────────────────────────────────────────────────────────────────────┐
-│                      IndexedDB                                       │
+│ IndexedDB │
 ├─────────────────────────────────────────────────────────────────────┤
-│      'SUP_OPS' database（操作日志）                                  │
-│                                                                      │
-│  ┌──────────────────────────────────────────────────────────┐       │
-│  │ ops（事件日志）    - 仅追加的操作日志                     │       │
-│  │ state_cache        - 定期状态快照                         │       │
-│  │ meta               - 向量时钟、同步状态                   │       │
-│  │ archive_young      - 最近归档的任务                       │       │
-│  │ archive_old        - 旧归档任务                           │       │
-│  │ client_id          - 同步设备标识（v6）                   │       │
-│  └──────────────────────────────────────────────────────────┘       │
-│                                                                      │
-│  所有模型数据均持久化于此                                             │
+│ 'SUP_OPS' database（操作日志） │
+│ │
+│ ┌──────────────────────────────────────────────────────────┐ │
+│ │ ops（事件日志） - 仅追加的操作日志 │ │
+│ │ state_cache - 定期状态快照 │ │
+│ │ meta - 向量时钟、同步状态 │ │
+│ │ archive_young - 最近归档的任务 │ │
+│ │ archive_old - 旧归档任务 │ │
+│ │ client_id - 同步设备标识（v6） │ │
+│ └──────────────────────────────────────────────────────────┘ │
+│ │
+│ 所有模型数据均持久化于此 │
 └─────────────────────────────────────────────────────────────────────┘
 \\\
 
@@ -200,98 +200,98 @@ interface StateCache {
 
 \\\
 User Action（用户操作）
-    │
-    ▼
+│
+▼
 NgRx Dispatch（派发动作）
-    │
-    ├──► Reducer 更新状态（乐观更新，内存中）
-    │
-    └──► OperationLogEffects
-              │
-              ├──► 过滤：action.meta.isPersistent === true？
-              │         └──► 若为 false 或缺失则跳过
-              │
-              ├──► 过滤：action.meta.isRemote === true？
-              │         └──► 跳过（防止重新记录同步/重放）
-              │
-              ├──► 将 action 转换为 Operation
-              │
-              ├──► 追加到 SUP_OPS.ops（磁盘）
-              │
-              ├──► 递增 META_MODEL.vectorClock（Part B 桥接）
-              │
-              └──► 广播到其他标签页
+│
+├──► Reducer 更新状态（乐观更新，内存中）
+│
+└──► OperationLogEffects
+│
+├──► 过滤：action.meta.isPersistent === true？
+│ └──► 若为 false 或缺失则跳过
+│
+├──► 过滤：action.meta.isRemote === true？
+│ └──► 跳过（防止重新记录同步/重放）
+│
+├──► 将 action 转换为 Operation
+│
+├──► 追加到 SUP_OPS.ops（磁盘）
+│
+├──► 递增 META_MODEL.vectorClock（Part B 桥接）
+│
+└──► 广播到其他标签页
 \\\
 
 ### 操作结构（Operation Structure）
 
-\\\	ypescript
+\\\ ypescript
 interface Operation {
-  id: string; // UUID v7（按时间排序）
-  actionType: string; // NgRx 动作类型
-  opType: OpType; // CRT | UPD | DEL | MOV | BATCH
-  entityType: EntityType; // TASK | PROJECT | TAG | NOTE | ...
-  entityId?: string; // 受影响的实体 ID
-  entityIds?: string[]; // 用于批量操作
-  payload: unknown; // 动作载荷
-  clientId: string; // 设备 ID
-  vectorClock: VectorClock; // 每操作的因果关系（用于 Part C）
-  timestamp: number; // 挂钟时间（epoch ms）
-  schemaVersion: number; // 用于迁移
+id: string; // UUID v7（按时间排序）
+actionType: string; // NgRx 动作类型
+opType: OpType; // CRT | UPD | DEL | MOV | BATCH
+entityType: EntityType; // TASK | PROJECT | TAG | NOTE | ...
+entityId?: string; // 受影响的实体 ID
+entityIds?: string[]; // 用于批量操作
+payload: unknown; // 动作载荷
+clientId: string; // 设备 ID
+vectorClock: VectorClock; // 每操作的因果关系（用于 Part C）
+timestamp: number; // 挂钟时间（epoch ms）
+schemaVersion: number; // 用于迁移
 }
 
 type OpType =
-  | 'CRT' // 创建（Create）
-  | 'UPD' // 更新（Update）
-  | 'DEL' // 删除（Delete）
-  | 'MOV' // 移动（Move，列表重排序）
-  | 'BATCH' // 批量操作（导入、批量更新）
-  | 'SYNC_IMPORT' // 从远程同步导入完整状态
-  | 'BACKUP_IMPORT' // 从备份文件导入完整状态
-  | 'REPAIR'; // 自动修复操作，包含完整的修复后状态
+| 'CRT' // 创建（Create）
+| 'UPD' // 更新（Update）
+| 'DEL' // 删除（Delete）
+| 'MOV' // 移动（Move，列表重排序）
+| 'BATCH' // 批量操作（导入、批量更新）
+| 'SYNC_IMPORT' // 从远程同步导入完整状态
+| 'BACKUP_IMPORT' // 从备份文件导入完整状态
+| 'REPAIR'; // 自动修复操作，包含完整的修复后状态
 
 type EntityType =
-  | 'TASK'
-  | 'PROJECT'
-  | 'TAG'
-  | 'NOTE'
-  | 'GLOBAL_CONFIG'
-  | 'SIMPLE_COUNTER'
-  | 'WORK_CONTEXT'
-  | 'TASK_REPEAT_CFG'
-  | 'ISSUE_PROVIDER'
-  | 'PLANNER'
-  | 'MENU_TREE'
-  | 'METRIC'
-  | 'BOARD'
-  | 'REMINDER'
-  | 'PLUGIN_USER_DATA'
-  | 'PLUGIN_METADATA'
-  | 'MIGRATION'
-  | 'RECOVERY'
-  | 'ALL';
+| 'TASK'
+| 'PROJECT'
+| 'TAG'
+| 'NOTE'
+| 'GLOBAL_CONFIG'
+| 'SIMPLE_COUNTER'
+| 'WORK_CONTEXT'
+| 'TASK_REPEAT_CFG'
+| 'ISSUE_PROVIDER'
+| 'PLANNER'
+| 'MENU_TREE'
+| 'METRIC'
+| 'BOARD'
+| 'REMINDER'
+| 'PLUGIN_USER_DATA'
+| 'PLUGIN_METADATA'
+| 'MIGRATION'
+| 'RECOVERY'
+| 'ALL';
 \\\
 
 ### 持久化动作模式（Persistent Action Pattern）
 
 动作基于显式的 meta.isPersistent: true 进行持久化：
 
-\\\	ypescript
+\\\ ypescript
 // persistent-action.interface.ts
 export interface PersistentActionMeta {
-  isPersistent?: boolean; // 为 true 时，动作将被持久化
-  entityType: EntityType;
-  entityId?: string;
-  entityIds?: string[]; // 用于批量操作
-  opType: OpType;
-  isRemote?: boolean; // 如果来自同步则为 TRUE（防止重新记录）
-  isBulk?: boolean; // 批量操作为 TRUE
+isPersistent?: boolean; // 为 true 时，动作将被持久化
+entityType: EntityType;
+entityId?: string;
+entityIds?: string[]; // 用于批量操作
+opType: OpType;
+isRemote?: boolean; // 如果来自同步则为 TRUE（防止重新记录）
+isBulk?: boolean; // 批量操作为 TRUE
 }
 
 // 类型守卫 - 仅持久化具有显式 isPersistent: true 的动作
 export const isPersistentAction = (action: Action): action is PersistentAction => {
-  const a = action as PersistentAction;
-  return !!a.meta && a.meta.isPersistent === true;
+const a = action as PersistentAction;
+return !!a.meta && a.meta.isPersistent === true;
 };
 \\\
 
@@ -306,27 +306,26 @@ export const isPersistentAction = (action: Action): action is PersistentAction =
 
 \\\
 App Startup（应用启动）
-    │
-    ▼
+│
+▼
 OperationLogHydratorService
-    │
-    ├──► 从 SUP_OPS.state_cache 加载快照
-    │         │
-    │         └──► 若无快照：从 'pf' 执行创世迁移（Genesis Migration）
-    │
-    ├──► 必要时运行 schema 迁移
-    │
-    ├──► 派发 loadAllData(snapshot, { isHydration: true })
-    │
-    └──► 加载尾部操作（seq > snapshot.lastAppliedOpSeq）
-              │
-              ├──► 如果最后一个 op 是 SyncImport：直接加载（跳过重放）
-              │
-              ├──► 否则：重放操作（通过 isRemote 标志防止重新记录）
-              │
-              └──► 如果重放了超过 10 个操作：保存新快照以加速未来加载
+│
+├──► 从 SUP_OPS.state_cache 加载快照
+│ │
+│ └──► 若无快照：从 'pf' 执行创世迁移（Genesis Migration）
+│
+├──► 必要时运行 schema 迁移
+│
+├──► 派发 loadAllData(snapshot, { isHydration: true })
+│
+└──► 加载尾部操作（seq > snapshot.lastAppliedOpSeq）
+│
+├──► 如果最后一个 op 是 SyncImport：直接加载（跳过重放）
+│
+├──► 否则：重放操作（通过 isRemote 标志防止重新记录）
+│
+└──► 如果重放了超过 10 个操作：保存新快照以加速未来加载
 \\\
-
 
 ### 水合优化（Hydration Optimizations）
 
@@ -340,19 +339,19 @@ OperationLogHydratorService
 
 首次启动时（SUP_OPS 为空），系统使用默认状态初始化：
 
-`	ypescript
+` ypescript
 async createGenesisSnapshot(): Promise<void> {
-  // 使用默认状态初始化，或从旧版迁移（如存在）
-  const initialState = await this.getInitialState();
+// 使用默认状态初始化，或从旧版迁移（如存在）
+const initialState = await this.getInitialState();
 
-  // 创建初始快照
-  await this.opLogStore.saveStateCache({
-    state: initialState,
-    lastAppliedOpSeq: 0,
-    vectorClock: {},
-    compactedAt: Date.now(),
-    schemaVersion: CURRENT_SCHEMA_VERSION
-  });
+// 创建初始快照
+await this.opLogStore.saveStateCache({
+state: initialState,
+lastAppliedOpSeq: 0,
+vectorClock: {},
+compactedAt: Date.now(),
+schemaVersion: CURRENT_SCHEMA_VERSION
+});
 }
 `
 
@@ -375,12 +374,12 @@ async createGenesisSnapshot(): Promise<void> {
 
 ### 过程
 
-`	ypescript
+` ypescript
 async compact(): Promise<void> {
-  // 1. 获取锁
-  await this.lockService.request('sp_op_log_compact', async () => {
-    // 2. 从 NgRx 读取当前状态（通过委托）
-    const currentState = await this.storeDelegate.getAllSyncModelDataFromStore();
+// 1. 获取锁
+await this.lockService.request('sp_op_log_compact', async () => {
+// 2. 从 NgRx 读取当前状态（通过委托）
+const currentState = await this.storeDelegate.getAllSyncModelDataFromStore();
 
     // 3. 保存新快照
     const lastSeq = await this.opLogStore.getLastSeq();
@@ -403,38 +402,39 @@ async compact(): Promise<void> {
         entry.appliedAt < cutoff &&
         entry.seq <= lastSeq
     );
-  });
+
+});
 }
 `
 
 ### 配置项
 
-| 设置                           | 值      | 描述                               |
-| ------------------------------ | ------- | ----------------------------------- |
-| 压缩触发阈值                   | 500 ops | 每次快照前的操作数                   |
-| 保留窗口                       | 7 天    | 保留最近同步的操作                   |
-| 紧急保留窗口                   | 1 天    | 配额超限时使用更短的保留期           |
-| 压缩超时                       | 25 秒   | 超时则中止（防止锁过期）             |
-| 最大压缩失败次数               | 3       | 失败超过此次数后通知用户             |
-| 未同步操作                     | ∞       | 永不删除未同步的操作                 |
-| 内存中最大下载操作数           | 50,000  | 限制 API 下载期间的内存占用          |
-| 远程文件保留天数               | 14 天   | 服务端操作文件保留时间               |
-| 最大保留远程文件数             | 100     | 服务器上保留的最小最近文件数         |
-| 最大冲突重试次数               | 5       | 拒绝失败操作前的重试次数             |
-| 拒绝操作警告阈值               | 10      | 触发用户通知的阈值                   |
-| 锁超时                         | 30 秒   | localStorage 回退锁超时              |
-| 锁获取超时                     | 60 秒   | 获取锁的最大等待时间                 |
-| 最大下载重试次数               | 3       | 文件下载失败的重试次数               |
-| 快照最大操作数（服务端）       | 100,000 | 服务端快照生成的内存保护阈值         |
+| 设置                     | 值      | 描述                         |
+| ------------------------ | ------- | ---------------------------- |
+| 压缩触发阈值             | 500 ops | 每次快照前的操作数           |
+| 保留窗口                 | 7 天    | 保留最近同步的操作           |
+| 紧急保留窗口             | 1 天    | 配额超限时使用更短的保留期   |
+| 压缩超时                 | 25 秒   | 超时则中止（防止锁过期）     |
+| 最大压缩失败次数         | 3       | 失败超过此次数后通知用户     |
+| 未同步操作               | ∞       | 永不删除未同步的操作         |
+| 内存中最大下载操作数     | 50,000  | 限制 API 下载期间的内存占用  |
+| 远程文件保留天数         | 14 天   | 服务端操作文件保留时间       |
+| 最大保留远程文件数       | 100     | 服务器上保留的最小最近文件数 |
+| 最大冲突重试次数         | 5       | 拒绝失败操作前的重试次数     |
+| 拒绝操作警告阈值         | 10      | 触发用户通知的阈值           |
+| 锁超时                   | 30 秒   | localStorage 回退锁超时      |
+| 锁获取超时               | 60 秒   | 获取锁的最大等待时间         |
+| 最大下载重试次数         | 3       | 文件下载失败的重试次数       |
+| 快照最大操作数（服务端） | 100,000 | 服务端快照生成的内存保护阈值 |
 
 ## A.5 多标签页协调
 
 ### 写入锁定
 
-`	ypescript
+` ypescript
 // 首选：Web Locks API
 await navigator.locks.request('sp_op_log_write', async () => {
-  await this.writeOperation(op);
+await this.writeOperation(op);
 });
 
 // 回退：localStorage 互斥锁（适用于旧版 WebViews）
@@ -448,19 +448,18 @@ await navigator.locks.request('sp_op_log_write', async () => {
 2. 通过 BroadcastChannel 广播
 3. 其他标签页接收并应用（使用 isRemote=true 防止重新记录）
 
-`	ypescript
+` ypescript
 // Tab A 写入
 this.broadcastChannel.postMessage({ type: 'NEW_OP', op });
 
 // Tab B 接收
 this.broadcastChannel.onmessage = (event) => {
-  if (event.data.type === 'NEW_OP') {
-    const action = convertOpToAction(event.data.op); // 设置 isRemote: true
-    this.store.dispatch(action);
-  }
+if (event.data.type === 'NEW_OP') {
+const action = convertOpToAction(event.data.op); // 设置 isRemote: true
+this.store.dispatch(action);
+}
 };
 `
-
 
 ## A.6 Effects 的 LOCAL_ACTIONS 令牌
 
@@ -476,7 +475,7 @@ this.broadcastChannel.onmessage = (event) => {
 
 LOCAL_ACTIONS 注入令牌提供了预先过滤的 Actions 流，排除了远程操作：
 
-`	ypescript
+` ypescript
 // src/app/util/local-actions.token.ts
 import { inject, InjectionToken } from '@angular/core';
 import { Actions } from '@ngrx/effects';
@@ -485,11 +484,11 @@ import { Observable } from 'rxjs';
 import { filter } from 'rxjs/operators';
 
 export const LOCAL_ACTIONS = new InjectionToken<Observable<Action>>('LOCAL_ACTIONS', {
-  providedIn: 'root',
-  factory: () => {
-    const actions$ = inject(Actions);
-    return actions$.pipe(filter((action: Action) => !(action as any).meta?.isRemote));
-  },
+providedIn: 'root',
+factory: () => {
+const actions$ = inject(Actions);
+return actions$.pipe(filter((action: Action) => !(action as any).meta?.isRemote));
+},
 });
 `
 
@@ -497,45 +496,45 @@ export const LOCAL_ACTIONS = new InjectionToken<Observable<Action>>('LOCAL_ACTIO
 
 对于**不应**针对远程操作运行的 effects，使用 LOCAL_ACTIONS 替代 Actions：
 
-`	ypescript
+` ypescript
 @Injectable()
 export class MyEffects {
-  private _actions$ = inject(LOCAL_ACTIONS); // 仅本地动作（排除 isRemote）
+private \_actions$ = inject(LOCAL_ACTIONS); // 仅本地动作（排除 isRemote）
 
-  // ✅ 对副作用使用 LOCAL_ACTIONS
-  showSnack$ = createEffect(
-    () =>
-      this._localActions$.pipe(
-        ofType(TaskSharedActions.updateTask),
-        filter((action) => action.task.changes.isDone === true),
-        tap(() => this.snackService.open({ msg: 'Task completed!' })),
-      ),
-    { dispatch: false },
-  );
+// ✅ 对副作用使用 LOCAL_ACTIONS
+showSnack$ = createEffect(
+() =>
+this.\_localActions$.pipe(
+ofType(TaskSharedActions.updateTask),
+filter((action) => action.task.changes.isDone === true),
+tap(() => this.snackService.open({ msg: 'Task completed!' })),
+),
+{ dispatch: false },
+);
 
-  // ✅ 对应全局应用的状态更新使用常规 actions$
+// ✅ 对应全局应用的状态更新使用常规 actions$
   moveTaskToList$ = createEffect(() =>
-    this._actions$.pipe(
-      ofType(moveTaskInTodayList),
-      // 该 effect 派发另一个动作 - 应对所有来源都生效
-      map(({ taskId }) => TaskSharedActions.updateTask({ ... })),
-    ),
-  );
+this.\_actions$.pipe(
+ofType(moveTaskInTodayList),
+// 该 effect 派发另一个动作 - 应对所有来源都生效
+map(({ taskId }) => TaskSharedActions.updateTask({ ... })),
+),
+);
 }
 `
 
 ### 何时使用 LOCAL_ACTIONS
 
-| 场景                             | 使用 LOCAL_ACTIONS？ | 原因                                        |
-| -------------------------------- | -------------------- | ------------------------------------------- |
-| 显示 snackbar/toast              | ✅ 是               | UI 通知已在原始客户端发生过                  |
-| 向 Jira/OpenProject 提交工作日志  | ✅ 是               | 外部 API 调用已执行过                       |
-| 播放音效                         | ✅ 是               | 音频反馈仅本地                              |
-| 更新 Electron 任务栏             | ✅ 是               | 桌面 UI 仅本地                              |
-| 派发插件钩子                     | ✅ 是               | 插件已在原始客户端运行过                    |
-| 更新 store 中的其他实体          | ❌ 否               | 状态变更应全局生效                          |
-| 导航/路由变更                    | ✅ 是               | 导航仅本地                                  |
-| 派发级联动作                    | ⚠️ 视情况而定        | 如果修改状态：否。如果仅副作用：是           |
+| 场景                             | 使用 LOCAL_ACTIONS？ | 原因                               |
+| -------------------------------- | -------------------- | ---------------------------------- |
+| 显示 snackbar/toast              | ✅ 是                | UI 通知已在原始客户端发生过        |
+| 向 Jira/OpenProject 提交工作日志 | ✅ 是                | 外部 API 调用已执行过              |
+| 播放音效                         | ✅ 是                | 音频反馈仅本地                     |
+| 更新 Electron 任务栏             | ✅ 是                | 桌面 UI 仅本地                     |
+| 派发插件钩子                     | ✅ 是                | 插件已在原始客户端运行过           |
+| 更新 store 中的其他实体          | ❌ 否                | 状态变更应全局生效                 |
+| 导航/路由变更                    | ✅ 是                | 导航仅本地                         |
+| 派发级联动作                     | ⚠️ 视情况而定        | 如果修改状态：否。如果仅副作用：是 |
 
 ---
 
@@ -544,39 +543,40 @@ export class MyEffects {
 ### SUP_OPS 损坏
 
 `
+
 1. 检测：水合失败或返回空/无效状态
 2. 检查旧版 'pf' 数据库中是否有数据
 3. 如果有数据：使用该数据运行恢复迁移
 4. 如果没有：检查远程同步是否有数据
 5. 如果远程有数据：强制同步下载
 6. 如果所有方法都失败：用户必须从备份恢复
-`
+   `
 
 ### 实现
 
-`	ypescript
+` ypescript
 async hydrateStore(): Promise<void> {
-  try {
-    const snapshot = await this.opLogStore.loadStateCache();
-    if (!snapshot || !this.isValidSnapshot(snapshot)) {
-      await this.attemptRecovery();
-      return;
-    }
-    // 正常水合...
-  } catch (e) {
-    await this.attemptRecovery();
-  }
+try {
+const snapshot = await this.opLogStore.loadStateCache();
+if (!snapshot || !this.isValidSnapshot(snapshot)) {
+await this.attemptRecovery();
+return;
+}
+// 正常水合...
+} catch (e) {
+await this.attemptRecovery();
+}
 }
 
 private async attemptRecovery(): Promise<void> {
-  // 1. 尝试从 state_cache 备份恢复
-  const backupState = await this.tryLoadBackupSnapshot();
-  if (backupState) {
-    await this.recoverFromBackup(backupState);
-    return;
-  }
-  // 2. 尝试远程同步（必要时触发 ServerMigrationService）
-  // 3. 向用户显示错误
+// 1. 尝试从 state_cache 备份恢复
+const backupState = await this.tryLoadBackupSnapshot();
+if (backupState) {
+await this.recoverFromBackup(backupState);
+return;
+}
+// 2. 尝试远程同步（必要时触发 ServerMigrationService）
+// 3. 向用户显示错误
 }
 `
 
@@ -598,31 +598,30 @@ export const MAX_VERSION_SKIP = 5; // 我们愿意尝试加载的最大版本跨
 
 ### 核心概念
 
-| 概念                   | 描述                                             |
-| ---------------------- | ------------------------------------------------ |
-| **Schema 版本号**      | 跟踪当前数据模型版本的整数（存储在 ops + 快照中） |
-| **迁移（Migration）**  | 将状态从版本 N 转换为 N+1 的函数                  |
-| **快照边界**           | 在加载快照时运行迁移，创建干净的版本化检查点      |
-| **前向兼容性**         | 新版应用可以读取旧版数据（通过迁移）              |
-| **向后兼容性**         | 旧版应用接收新版操作（通过优雅降级）              |
+| 概念                  | 描述                                              |
+| --------------------- | ------------------------------------------------- |
+| **Schema 版本号**     | 跟踪当前数据模型版本的整数（存储在 ops + 快照中） |
+| **迁移（Migration）** | 将状态从版本 N 转换为 N+1 的函数                  |
+| **快照边界**          | 在加载快照时运行迁移，创建干净的版本化检查点      |
+| **前向兼容性**        | 新版应用可以读取旧版数据（通过迁移）              |
+| **向后兼容性**        | 旧版应用接收新版操作（通过优雅降级）              |
 
 ### 迁移触发条件
 
 \\\
 ┌─────────────────────────────────────────────────────────────────────┐
-│                     检测到应用更新                                    │
-│                     （schemaVersion 不匹配）                          │
+│ 检测到应用更新 │
+│ （schemaVersion 不匹配） │
 └─────────────────────────────────────────────────────────────────────┘
-                               │
-           ┌───────────────────┼───────────────────┐
-           ▼                   ▼                   ▼
-    加载快照              重放操作              接收远程操作
-    （旧版本）           （混合版本）          （更新/更旧版本）
-           │                   │                   │
-           ▼                   ▼                   ▼
-    对完整状态            按原样应用操作        按需迁移
-    运行迁移              （操作是增量的）     （完整状态导入）
-
+│
+┌───────────────────┼───────────────────┐
+▼ ▼ ▼
+加载快照 重放操作 接收远程操作
+（旧版本） （混合版本） （更新/更旧版本）
+│ │ │
+▼ ▼ ▼
+对完整状态 按原样应用操作 按需迁移
+运行迁移 （操作是增量的） （完整状态导入）
 
 ### A.7.1 快照迁移（本地）
 
@@ -783,12 +782,12 @@ interface SchemaMigration {
 
 **设计原则：**
 
-| 原则                 | 描述                               |
-| -------------------- | ---------------------------------- |
-| **优先增量变更**     | 添加带有默认值的新可选字段最安全       |
-| **避免破坏性重命名** | 使用别名或转换替代                    |
-| **保留未知字段**     | 不要剥离来自较新版本的字段             |
-| **幂等迁移**         | 运行两次应保持安全                    |
+| 原则                 | 描述                             |
+| -------------------- | -------------------------------- |
+| **优先增量变更**     | 添加带有默认值的新可选字段最安全 |
+| **避免破坏性重命名** | 使用别名或转换替代               |
+| **保留未知字段**     | 不要剥离来自较新版本的字段       |
+| **幂等迁移**         | 运行两次应保持安全               |
 
 **版本不匹配处理：** 远程数据太新 → 提示用户更新应用。远程数据太旧 → 显示错误，可能需要手动干预。
 
@@ -817,13 +816,13 @@ interface SchemaMigration {
 
 ### A.7.7 何时需要操作迁移？
 
-| 变更类型         | 状态迁移          | 操作迁移                      | 示例                       |
-| ---------------- | ----------------- | ----------------------------- | -------------------------- |
-| 添加可选字段     | ✅（设置默认值）   | ❌（旧操作只是不设置它）        | `priority?: string`        |
-| 重命名字段       | ✅（复制旧→新）    | ✅（转换 payload）             | `estimate` → `timeEstimate`|
-| 移除字段/功能    | ✅（删除它）       | ✅（丢弃操作或剥离字段）        | 移除 `pomodoro`            |
-| 更改字段类型     | ✅（转换）         | ✅（转换 payload）             | `"1h"` → `3600`            |
-| 添加实体类型     | ✅（初始化）       | ❌（不存在旧操作）              | 新增 `Board` 实体          |
+| 变更类型      | 状态迁移         | 操作迁移                 | 示例                        |
+| ------------- | ---------------- | ------------------------ | --------------------------- |
+| 添加可选字段  | ✅（设置默认值） | ❌（旧操作只是不设置它） | `priority?: string`         |
+| 重命名字段    | ✅（复制旧→新）  | ✅（转换 payload）       | `estimate` → `timeEstimate` |
+| 移除字段/功能 | ✅（删除它）     | ✅（丢弃操作或剥离字段） | 移除 `pomodoro`             |
+| 更改字段类型  | ✅（转换）       | ✅（转换 payload）       | `"1h"` → `3600`             |
+| 添加实体类型  | ✅（初始化）     | ❌（不存在旧操作）       | 新增 `Board` 实体           |
 
 **经验法则：** 增量变更（新的可选字段、新实体）不需要操作迁移。字段重命名/删除需要操作迁移。
 
@@ -852,13 +851,13 @@ interface SchemaMigration {
 
 | 变更类型                 | 递增版本？ | 原因                                           |
 | ------------------------ | ---------- | ---------------------------------------------- |
-| 添加带有默认值的可选字段   | ✅ 是      | 旧客户端不会设置它；新客户端需要知道应用默认值   |
-| 重命名字段               | ✅ 是      | 操作需要 payload 转换                           |
-| 移除字段/功能            | ✅ 是      | 操作可能引用已移除的实体                        |
-| 更改字段类型             | ✅ 是      | 载荷值需要转换                                  |
-| 添加新实体类型           | ✅ 是      | 旧快照需要初始化                                |
-| 添加新动作类型           | ❌ 否      | 旧客户端忽略未知动作                            |
-| Reducer 的 bug 修复     | ❌ 否      | 非 schema 变更                                  |
+| 添加带有默认值的可选字段 | ✅ 是      | 旧客户端不会设置它；新客户端需要知道应用默认值 |
+| 重命名字段               | ✅ 是      | 操作需要 payload 转换                          |
+| 移除字段/功能            | ✅ 是      | 操作可能引用已移除的实体                       |
+| 更改字段类型             | ✅ 是      | 载荷值需要转换                                 |
+| 添加新实体类型           | ✅ 是      | 旧快照需要初始化                               |
+| 添加新动作类型           | ❌ 否      | 旧客户端忽略未知动作                           |
+| Reducer 的 bug 修复      | ❌ 否      | 非 schema 变更                                 |
 
 **决策规则：** 如果变更影响 `state_cache` 快照或操作 payload 的结构，则递增版本号。
 
@@ -925,12 +924,12 @@ async migrateOperation(op: Operation): Promise<Operation | null> {
 
 #### 向后兼容性保证
 
-| 场景                               | 行为                               | 用户体验               |
-| ---------------------------------- | ---------------------------------- | ---------------------- |
-| 新版客户端 → 旧版客户端              | 操作按原样上传；旧版客户端接收时迁移 | 无缝                   |
-| 旧版客户端 → 新版客户端              | 新版客户端迁移传入操作               | 无缝                   |
-| 客户端太旧（落后 > MAX_VERSION_SKIP）| 拒绝操作，提示更新                  | "请更新应用"弹窗        |
-| 客户端太新（服务器拒绝）             | 不适用 - 服务器不验证 schema        | 无问题                 |
+| 场景                                  | 行为                                 | 用户体验         |
+| ------------------------------------- | ------------------------------------ | ---------------- |
+| 新版客户端 → 旧版客户端               | 操作按原样上传；旧版客户端接收时迁移 | 无缝             |
+| 旧版客户端 → 新版客户端               | 新版客户端迁移传入操作               | 无缝             |
+| 客户端太旧（落后 > MAX_VERSION_SKIP） | 拒绝操作，提示更新                   | "请更新应用"弹窗 |
+| 客户端太新（服务器拒绝）              | 不适用 - 服务器不验证 schema         | 无问题           |
 
 **MAX_VERSION_SKIP = 5**: 落后超过 5 个版本的客户端必须更新后才能同步。这限制了迁移链的复杂度。
 
@@ -1131,11 +1130,11 @@ async hydrateFromRemoteSync(downloadedMainModelData?: Record<string, unknown>): 
 
 ### loadAllData 变体
 
-| 来源             | 创建操作？         | 强制快照？ |
-| ---------------- | ----------------- | ---------- |
-| 水合（启动时）   | 否                | 否         |
-| 远程同步下载     | 是（SYNC_IMPORT） | 是         |
-| 备份文件导入     | 是（BACKUP_IMPORT）| 是         |
+| 来源           | 创建操作？          | 强制快照？ |
+| -------------- | ------------------- | ---------- |
+| 水合（启动时） | 否                  | 否         |
+| 远程同步下载   | 是（SYNC_IMPORT）   | 是         |
+| 备份文件导入   | 是（BACKUP_IMPORT） | 是         |
 
 ## B.5 归档数据处理
 
@@ -1170,13 +1169,13 @@ async hydrateFromRemoteSync(downloadedMainModelData?: Record<string, unknown>): 
 
 ## C.1 服务器同步与基于文件的同步有何不同
 
-| 方面             | 基于文件的同步（Part B）      | 服务器同步（Part C）      |
-| ---------------- | ---------------------------- | ------------------------ |
-| 同步内容         | 状态快照 + 最近操作            | 单个操作                  |
-| 冲突检测         | 快照级别的向量时钟             | 实体级别的每操作检测        |
-| 传输方式         | 单个文件（sync-data.json）    | HTTP API                 |
-| 操作日志角色     | 从操作构建快照                 | 即同步本身                |
-| `syncedAt` 跟踪  | 不需要                       | 必需                      |
+| 方面            | 基于文件的同步（Part B）   | 服务器同步（Part C） |
+| --------------- | -------------------------- | -------------------- |
+| 同步内容        | 状态快照 + 最近操作        | 单个操作             |
+| 冲突检测        | 快照级别的向量时钟         | 实体级别的每操作检测 |
+| 传输方式        | 单个文件（sync-data.json） | HTTP API             |
+| 操作日志角色    | 从操作构建快照             | 即同步本身           |
+| `syncedAt` 跟踪 | 不需要                     | 必需                 |
 
 ## C.2 操作同步协议
 
@@ -1303,11 +1302,11 @@ for (const entry of fullStateOps) {
 
 ### OpType 到 Reason 的映射
 
-| OpType          | 快照 Reason | 用例                       |
-| --------------- | ----------- | -------------------------- |
-| `SYNC_IMPORT`   | `initial`   | 首次同步或完整状态刷新       |
-| `BACKUP_IMPORT` | `recovery`  | 从备份文件恢复              |
-| `REPAIR`        | `recovery`  | 使用修正状态的自动修复       |
+| OpType          | 快照 Reason | 用例                   |
+| --------------- | ----------- | ---------------------- |
+| `SYNC_IMPORT`   | `initial`   | 首次同步或完整状态刷新 |
+| `BACKUP_IMPORT` | `recovery`  | 从备份文件恢复         |
+| `REPAIR`        | `recovery`  | 使用修正状态的自动修复 |
 
 ### 好处
 
@@ -1367,7 +1366,7 @@ async detectConflicts(remoteOps: Operation[]): Promise<ConflictResult> {
 - **已应用/已同步的操作**：已在客户端之间协调完成。它们的向量时钟贡献给了全局同步状态，但不再代表可能丢失的"进行中"变更。
 - **待处理操作**：尚未同步。这些代表可能与传入远程操作冲突的变更。
 
-如果客户端 A 发送了一个任务的删除操作，而客户端 B 对此任务没有待处理操作，客户端 B 应该直接应用删除 —— 没有本地工作会丢失。快照/前沿向量时钟跟踪的是_历史_，而非_意图_。
+如果客户端 A 发送了一个任务的删除操作，而客户端 B 对此任务没有待处理操作，客户端 B 应该直接应用删除 —— 没有本地工作会丢失。快照/前沿向量时钟跟踪的是*历史*，而非*意图*。
 
 ## C.5 冲突解决（LWW 自动解决）
 
@@ -1451,10 +1450,10 @@ async autoResolveConflictsLWW(conflicts: EntityConflict[], nonConflictingOps: Op
 
 `lwwUpdateMetaReducer` 处理 LWW 更新动作（本地方在冲突中胜出时创建）的方式因实体的存储模式而异：
 
-| 存储模式     | 实体类型                                               | LWW 更新行为                                     |
-| ------------ | ------------------------------------------------------ | ------------------------------------------------ |
-| **Adapter**  | TASK、PROJECT、TAG、NOTE、TASK_REPEAT_CFG 等            | 通过 NgRx 实体适配器进行单个实体替换（`updateOne` 或 `addOne`） |
-| **Singleton**| GLOBAL_CONFIG、TIME_TRACKING、MENU_TREE、WORK_CONTEXT   | 整个功能状态被胜出数据替换，伴随全量的 isDirty 检查 |
+| 存储模式      | 实体类型                                              | LWW 更新行为                                                    |
+| ------------- | ----------------------------------------------------- | --------------------------------------------------------------- |
+| **Adapter**   | TASK、PROJECT、TAG、NOTE、TASK_REPEAT_CFG 等          | 通过 NgRx 实体适配器进行单个实体替换（`updateOne` 或 `addOne`） |
+| **Singleton** | GLOBAL_CONFIG、TIME_TRACKING、MENU_TREE、WORK_CONTEXT | 整个功能状态被胜出数据替换，伴随全量的 isDirty 检查             |
 
 ### 单例实体 LWW 更新的差异
 
@@ -1534,12 +1533,12 @@ for (const op of ops) {
 
 ### 向量时钟比较结果
 
-| 比较结果       | 含义                           | 操作                       |
-| -------------- | ------------------------------ | -------------------------- |
-| `GREATER_THAN` | 操作在看见导入后创建            | ✅ 保留（知晓导入）         |
-| `EQUAL`        | 与导入相同的因果历史            | ✅ 保留                    |
-| `LESS_THAN`    | 操作被导入支配                 | ❌ 丢弃（已被包含）         |
-| `CONCURRENT`   | 操作在不知晓导入的情况下创建    | ❌ 丢弃（全新状态）         |
+| 比较结果       | 含义                         | 操作                |
+| -------------- | ---------------------------- | ------------------- |
+| `GREATER_THAN` | 操作在看见导入后创建         | ✅ 保留（知晓导入） |
+| `EQUAL`        | 与导入相同的因果历史         | ✅ 保留             |
+| `LESS_THAN`    | 操作被导入支配               | ❌ 丢弃（已被包含） |
+| `CONCURRENT`   | 操作在不知晓导入的情况下创建 | ❌ 丢弃（全新状态） |
 
 **示例：**
 
@@ -1562,12 +1561,12 @@ for (const op of ops) {
 
 四个验证检查点确保整个操作生命周期中的数据完整性：
 
-| 检查点 | 位置                                     | 时机                       | 失败时的操作                              |
-| ------ | ---------------------------------------- | -------------------------- | ----------------------------------------- |
-| **A**  | `operation-log.effects.ts`               | 写入 IndexedDB 之前         | 拒绝操作、记录错误、显示 snackbar          |
-| **B**  | `operation-log-hydrator.service.ts`      | 加载快照后                  | 尝试修复、创建 REPAIR 操作                |
-| **C**  | `operation-log-hydrator.service.ts`      | 重放尾部操作后              | 尝试修复、创建 REPAIR 操作                |
-| **D**  | `operation-log-sync.service.ts`          | 应用远程操作后              | 尝试修复、创建 REPAIR 操作                |
+| 检查点 | 位置                                | 时机                | 失败时的操作                      |
+| ------ | ----------------------------------- | ------------------- | --------------------------------- |
+| **A**  | `operation-log.effects.ts`          | 写入 IndexedDB 之前 | 拒绝操作、记录错误、显示 snackbar |
+| **B**  | `operation-log-hydrator.service.ts` | 加载快照后          | 尝试修复、创建 REPAIR 操作        |
+| **C**  | `operation-log-hydrator.service.ts` | 重放尾部操作后      | 尝试修复、创建 REPAIR 操作        |
+| **D**  | `operation-log-sync.service.ts`     | 应用远程操作后      | 尝试修复、创建 REPAIR 操作        |
 
 ## D.2 REPAIR 操作类型
 
@@ -1699,19 +1698,14 @@ export class ValidateStateService {
     try {
       isRelatedValid = isRelatedModelDataValid(state);
     } catch (e) {
-      PFLog.warn(
-        'isRelatedModelDataValid 抛出错误，视为验证失败',
-        e,
-      );
+      PFLog.warn('isRelatedModelDataValid 抛出错误，视为验证失败', e);
       isRelatedValid = false;
     }
 
     return {
       isValid,
       typiaErrors,
-      crossModelError: !isRelatedValid
-        ? 'isRelatedModelDataValid 抛出错误'
-        : undefined,
+      crossModelError: !isRelatedValid ? 'isRelatedModelDataValid 抛出错误' : undefined,
     };
   }
 
@@ -1857,11 +1851,11 @@ export class RepairOperationService {
 
 在操作日志架构中，**我们不直接同步归档文件。** 相反，我们同步修改归档的**指令**。由于逻辑是确定性的，所有客户端最终都会拥有相同的归档文件，而无需实际传输它们。
 
-| 组件             | 同步策略               | 机制                                                  |
-| ---------------- | ---------------------- | ----------------------------------------------------- |
-| **活跃状态**     | **操作日志**           | 标准同步（操作应用到 Redux）                           |
-| **ArchiveYoung** | **确定性副作用**       | `moveToArchive` 操作在所有客户端上触发从 Active → Young 的本地移动 |
-| **ArchiveOld**   | **确定性副作用**       | `flushYoungToOld` 操作在所有客户端上触发从 Young → Old 的本地刷新 |
+| 组件             | 同步策略         | 机制                                                               |
+| ---------------- | ---------------- | ------------------------------------------------------------------ |
+| **活跃状态**     | **操作日志**     | 标准同步（操作应用到 Redux）                                       |
+| **ArchiveYoung** | **确定性副作用** | `moveToArchive` 操作在所有客户端上触发从 Active → Young 的本地移动 |
+| **ArchiveOld**   | **确定性副作用** | `flushYoungToOld` 操作在所有客户端上触发从 Young → Old 的本地刷新  |
 
 ### E.3 工作流：moveToArchive
 
@@ -1888,11 +1882,11 @@ _计划未来实现。_ 当 `ArchiveYoung` 增长过大时，客户端发出 `fl
 
 所有归档操作必须具有幂等性：
 
-| 操作                | 保证                                   |
-| ------------------- | -------------------------------------- |
-| `moveToArchive`     | 如果任务已在归档中则跳过                |
-| `flushYoungToOld`   | 仅移动尚未在 Old 中的项目               |
-| `restoreFromArchive`| 如果任务已在活跃状态中则跳过            |
+| 操作                 | 保证                         |
+| -------------------- | ---------------------------- |
+| `moveToArchive`      | 如果任务已在归档中则跳过     |
+| `flushYoungToOld`    | 仅移动尚未在 Old 中的项目    |
+| `restoreFromArchive` | 如果任务已在活跃状态中则跳过 |
 
 **边界情况：** 缺失实体（已删除/乱序）→ 排队等待重试或跳过。乱序刷新 → 如果 Young 为空，则幂等地无操作。
 
@@ -1924,11 +1918,11 @@ interface TimeTrackingState {
 
 时间跟踪数据存在于三个位置：
 
-| 位置             | 内容                    | 同步频率           |
-| ---------------- | ----------------------- | ------------------ |
-| **活跃状态**     | 仅当天的时间跟踪         | 每次同步（小）      |
-| **archiveYoung** | 近期数据（< 21 天）      | 每日（中等）        |
-| **archiveOld**   | 历史数据（≥ 21 天）     | 仅刷新时（很少）    |
+| 位置             | 内容                | 同步频率         |
+| ---------------- | ------------------- | ---------------- |
+| **活跃状态**     | 仅当天的时间跟踪    | 每次同步（小）   |
+| **archiveYoung** | 近期数据（< 21 天） | 每日（中等）     |
+| **archiveOld**   | 历史数据（≥ 21 天） | 仅刷新时（很少） |
 
 这种拆分显著减小了同步载荷大小。
 
@@ -1979,25 +1973,25 @@ interface TimeTrackingState {
 
 ### E.6.7 关键实现文件
 
-| 文件                                      | 用途                          |
-| ----------------------------------------- | ----------------------------- |
-| `merge-time-tracking-states.ts`           | 三源合并（带优先级）            |
-| `sort-data-to-flush.ts`                   | 归档刷新逻辑（young → old）    |
-| `time-tracking.reducer.ts`                | syncTimeTracking 的 NgRx reducer |
-| `archive-operation-handler.service.ts`    | 远程处理 flushYoungToOld       |
+| 文件                                   | 用途                             |
+| -------------------------------------- | -------------------------------- |
+| `merge-time-tracking-states.ts`        | 三源合并（带优先级）             |
+| `sort-data-to-flush.ts`                | 归档刷新逻辑（young → old）      |
+| `time-tracking.reducer.ts`             | syncTimeTracking 的 NgRx reducer |
+| `archive-operation-handler.service.ts` | 远程处理 flushYoungToOld         |
 
 ## E.7 归档载荷：被拒绝的优化方案
 
-`moveToArchive` 刻意携带**完整任务数据**（约 2 KB/任务），而不仅仅是 ID。原因：归档同步涉及两个系统——操作立即同步，但归档模型文件稍后同步。接收到 `moveToArchive` 的远程客户端必须_现在_就将任务写入其本地归档，在归档文件到达之前，而此时任务已从发起客户端的活跃状态中删除。因此操作必须自给自足。
+`moveToArchive` 刻意携带**完整任务数据**（约 2 KB/任务），而不仅仅是 ID。原因：归档同步涉及两个系统——操作立即同步，但归档模型文件稍后同步。接收到 `moveToArchive` 的远程客户端必须*现在*就将任务写入其本地归档，在归档文件到达之前，而此时任务已从发起客户端的活跃状态中删除。因此操作必须自给自足。
 
 较小的载荷方案经过探索后被拒绝：
 
-| 选项                            | 想法                                       | 被拒绝的原因                                                                                             |
-| ------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
-| A — 私有 `_tasks` 字段          | 存储前剥离                                  | 远程操作仍需要完整数据进行同步                                                                           |
-| B — meta-reducer 丰富           | 删除前从状态捕获任务                        | meta-reducer 必须保持纯函数；从同步 reducer 异步操作很麻烦                                               |
-| C — 两阶段（写入 + 删除）       | 拆分为两个操作                              | 总载荷相同，只是增加了复杂性                                                                             |
-| D — 基于操作的归档 store        | 归档完全由仅 ID 操作填充                    | 迁移多年现有归档数据；初始同步必须重放 20K+ 归档操作；无界操作日志增长；压缩必须保留归档状态；PFAPI 过渡 |
+| 选项                      | 想法                     | 被拒绝的原因                                                                                             |
+| ------------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------- |
+| A — 私有 `_tasks` 字段    | 存储前剥离               | 远程操作仍需要完整数据进行同步                                                                           |
+| B — meta-reducer 丰富     | 删除前从状态捕获任务     | meta-reducer 必须保持纯函数；从同步 reducer 异步操作很麻烦                                               |
+| C — 两阶段（写入 + 删除） | 拆分为两个操作           | 总载荷相同，只是增加了复杂性                                                                             |
+| D — 基于操作的归档 store  | 归档完全由仅 ID 操作填充 | 迁移多年现有归档数据；初始同步必须重放 20K+ 归档操作；无界操作日志增长；压缩必须保留归档状态；PFAPI 过渡 |
 
 **决定：保留完整载荷方案**——它能工作，没有时序边界情况，简单直接，且归档不频繁（一天结束时，而非持续）。大小缩减不值得增加的复杂性。对于非常大的归档，以 `ARCHIVE_CHUNK_SIZE = 25` 分块派发。
 
@@ -2044,17 +2038,17 @@ Meta-reducer 在动作到达功能 reducer 之前拦截它们，并可原子性�
 
 ### 正在使用的 Meta-Reducer
 
-| Meta-Reducer                          | 用途                              |
-| ------------------------------------- | --------------------------------- |
-| `tagSharedMetaReducer`                | 标签删除清理（任务、重复配置、时间跟踪） |
-| `projectSharedMetaReducer`            | 项目删除清理                         |
-| `taskSharedCrudMetaReducer`           | 任务 CRUD（含标签/项目更新）          |
-| `taskSharedLifecycleMetaReducer`      | 任务生命周期（归档、恢复）            |
-| `taskSharedSchedulingMetaReducer`     | 任务排程（含今日标签更新）            |
-| `plannerSharedMetaReducer`            | 规划器日管理                         |
-| `taskRepeatCfgSharedMetaReducer`      | 重复配置删除（含任务清理）            |
-| `issueProviderSharedMetaReducer`      | 问题提供者更新                       |
-| `operationCaptureMetaReducer`         | 捕获 before/after 状态，排入实体变更队列 |
+| Meta-Reducer                      | 用途                                     |
+| --------------------------------- | ---------------------------------------- |
+| `tagSharedMetaReducer`            | 标签删除清理（任务、重复配置、时间跟踪） |
+| `projectSharedMetaReducer`        | 项目删除清理                             |
+| `taskSharedCrudMetaReducer`       | 任务 CRUD（含标签/项目更新）             |
+| `taskSharedLifecycleMetaReducer`  | 任务生命周期（归档、恢复）               |
+| `taskSharedSchedulingMetaReducer` | 任务排程（含今日标签更新）               |
+| `plannerSharedMetaReducer`        | 规划器日管理                             |
+| `taskRepeatCfgSharedMetaReducer`  | 重复配置删除（含任务清理）               |
+| `issueProviderSharedMetaReducer`  | 问题提供者更新                           |
+| `operationCaptureMetaReducer`     | 捕获 before/after 状态，排入实体变更队列 |
 
 ## F.3 多实体操作捕获
 
@@ -2070,35 +2064,35 @@ FIFO 队列之所以有效，是因为 NgRx reducer 顺序处理动作，而 eff
 
 \`\`\`
 用户操作（例如删除标签）
-    │
-    ▼
+│
+▼
 tagSharedMetaReducer（+ 其他 meta-reducer）
-    ├──► 原子性地更新所有相关实体
-    │
-    ▼
+├──► 原子性地更新所有相关实体
+│
+▼
 功能 Reducers
-    │
-    ▼
+│
+▼
 operation-capture.meta-reducer
-    ├──► 调用 OperationCaptureService.enqueue(action)
-    │         └──► 从 action payload 提取实体变更（针对特殊情况）
-    │         └──► 推入 FIFO 队列
-    │
-    ▼
+├──► 调用 OperationCaptureService.enqueue(action)
+│ └──► 从 action payload 提取实体变更（针对特殊情况）
+│ └──► 推入 FIFO 队列
+│
+▼
 OperationLogEffects
-    ├──► 调用 OperationCaptureService.dequeue() 获取实体变更
-    └──► 创建包含 action payload 的单个 Operation
+├──► 调用 OperationCaptureService.dequeue() 获取实体变更
+└──► 创建包含 action payload 的单个 Operation
 
 ## F.4 何时使用 Meta-Reducer vs Effect
 
-| 场景                             | 使用 Meta-Reducer | 使用 Effect |
-| -------------------------------- | ----------------- | ----------- |
-| 更新 store 中的相关实体          | ✅                | ❌          |
-| 删除实体及其清理                | ✅                | ❌          |
-| UI 通知（snackbar、音效）        | ❌                | ✅          |
-| 外部 API 调用                    | ❌                | ✅          |
-| 归档操作（异步 I/O）             | ❌                | ✅          |
-| 导航/路由                        | ❌                | ✅          |
+| 场景                      | 使用 Meta-Reducer | 使用 Effect |
+| ------------------------- | ----------------- | ----------- |
+| 更新 store 中的相关实体   | ✅                | ❌          |
+| 删除实体及其清理          | ✅                | ❌          |
+| UI 通知（snackbar、音效） | ❌                | ✅          |
+| 外部 API 调用             | ❌                | ✅          |
+| 归档操作（异步 I/O）      | ❌                | ✅          |
+| 导航/路由                 | ❌                | ✅          |
 
 **经验法则**：如果修改 NgRx 状态，使用 meta-reducer。如果是副作用（I/O、UI、外部），使用带有 `LOCAL_ACTIONS` 的 effect。
 
@@ -2177,9 +2171,9 @@ export const computeOrderedTaskIdsForTag = (
 
 ### 未实现 ⚠️
 
-| 项目                       | 章节   | 缺少时的风险                              | 何时关键                                           |
-| -------------------------- | ------ | ----------------------------------------- | -------------------------------------------------- |
-| **冲突感知操作迁移**       | A.7.11 | 冲突可能比较不匹配的 schema                | 在任何重命名/移除字段的 schema 迁移之前              |
+| 项目                 | 章节   | 缺少时的风险                | 何时关键                                |
+| -------------------- | ------ | --------------------------- | --------------------------------------- |
+| **冲突感知操作迁移** | A.7.11 | 冲突可能比较不匹配的 schema | 在任何重命名/移除字段的 schema 迁移之前 |
 
 > **注意**：A.7.11 是跨版本同步所必需的。目前安全，因为 `CURRENT_SCHEMA_VERSION = 1`（所有客户端版本相同）。参见 [A.7.11 临时防护措施](#interim-guardrails-until-implementation) 了解预发布检查清单。
 
@@ -2243,19 +2237,43 @@ export const computeOrderedTaskIdsForTag = (
 - REPAIR 操作类型（带完整状态 + 修复摘要的自动修复）
 - ValidateStateService（Typia 验证 + dataRepair() 集成）
 - RepairOperationService（创建 REPAIR 操作 + 用户通知）
+- 修复时的用户通知（包含问题计数的 snackbar）
 - 带有 `isRepairInProgress` 标志的无限循环防护
 
 ---
 
 # 未来增强功能 🔮
 
-_本节记录已识别但尚未排期的功能。_
+| 组件      | 描述                     | 优先级 | 备注                                                  |
+| --------- | ------------------------ | ------ | ----------------------------------------------------- |
+| 自动合并  | 对非冲突字段进行自动合并 | 低     |                                                       |
+| 撤销/重做 | 利用 op-log 实现撤销历史 | 低     |                                                       |
+| 墓碑机制  | 带保留窗口的软删除       | 中     | 2025 年 12 月推迟——当前安全措施已足够（详见 todo.md） |
+| A.7.11    | 冲突感知操作迁移         | 高     | `CURRENT_SCHEMA_VERSION > 1` 时跨版本同步所必需       |
 
-### 跨版本同步（A.7.8 / A.7.11）
-当 `CURRENT_SCHEMA_VERSION > 1` 时需要。包括冲突感知操作迁移和跨版本客户端测试。
-
-### 标准化的同步错误码
-目前同步错误主要在服务器端使用结构化错误码（`SYNC_ERROR_CODES`），但客户端错误报告可以通过标准化客户端错误码、更好的用户可见错误消息以及增强的恢复操作（如自动重试和引导式修复工作流）来改进。未来工作应侧重于统一客户端错误码、改进用户消息传递以及公共 API 文档。
+> **最近已完成（2025 年 12 月）：**
+>
+> - **服务器同步（SuperSync）**：完整上传/下载基础设施，包含冲突检测、用户解决方案 UI 和集成测试
+> - **端到端加密**：通过 `OperationEncryptionService` 实现 AES-256-GCM 载荷加密及 Argon2id 密钥派生
+> - **服务器安全加固**：审计日志、结构化错误码、请求去重、事务隔离、输入验证、速率限制
+> - **统一归档处理**：`ArchiveOperationHandler` 现在是所有归档操作的唯一真相源，由本地 effects 和远程操作应用共同使用
+> - **简化的 OperationCaptureService**：重构为 FIFO 队列，配合引用相等性优化检测已变更的功能状态
+> - **简化的 OperationApplierService**：重构为快速失败方法——缺少硬依赖时抛出 `SyncStateCorruptedError`（无重试队列）
+> - **标签清理**：删除父任务时从标签中移除子任务 ID，同步时过滤不存在的 taskIds
+> - **基于锚点的移动操作**：所有任务拖放移动现在使用 `afterTaskId` 而非完整列表替换（包括子任务移动）
+> - **配额处理**：`QuotaExceededError` 时进行紧急压缩和断路器保护
+> - **`syncedAt` 索引**：加速 `getUnsynced()` 查询
+> - **持久化压缩计数器**：跨标签页/重启跟踪操作计数
+> - **插件数据同步**：插件用户数据和元数据的操作日志记录
+> - **间隙检测**：下载操作检测并报告序列间隙
+> - **服务端冲突检测**：防止服务端的并发修改
+> - **压缩竞态安全**：安全检车——若快照期间写入了新操作则中止删除
+> - **meta-reducer 中的实体验证**：改进的 getTag/getProject 辅助函数，包含验证和安全变体
+> - **deleteTasks 中的项目清理**：handleDeleteTasks 现在清理项目的 taskIds/backlogTaskIds
+> - **归档验证**：archiveOld 任务现在验证项目/标签引用，添加了 null 安全检查
+> - **锁服务鲁棒性**：在回退锁中处理 NaN 时间戳和无效锁格式
+> - **数组载荷拒绝**：显式检查拒绝数组（会绕过 `typeof === 'object'`）
+> - **待处理操作过期**：待处理超过 24 小时的操作被拒绝而非重放（PENDING_OPERATION_EXPIRY_MS）
 
 ---
 
@@ -2263,8 +2281,14 @@ _本节记录已识别但尚未排期的功能。_
 
 ```
 src/app/op-log/
+├── operation.types.ts                        # 类型定义（Operation、OpType、EntityType）
+├── operation-log.const.ts                    # 常量（阈值、超时、限制）
+├── operation-log.effects.ts                  # 动作捕获 + META_MODEL 桥接
+├── operation-converter.util.ts               # Op ↔ Action 转换
+├── persistent-action.interface.ts            # PersistentAction 类型 + isPersistentAction 守卫
+├── entity-key.util.ts                        # 实体键生成工具
 ├── store/
-│   ├── operation-log.effects.ts             # NgRx effect：捕获 + 持久化 + 广播 + 同步
+│   ├── operation-log-store.service.ts        # SUP_OPS IndexedDB 封装
 │   ├── operation-log-hydrator.service.ts     # 启动水合（快照 + 尾部重放）
 │   ├── operation-log-compaction.service.ts   # 快照 + 清理 + 紧急模式
 │   ├── operation-log-manifest.service.ts     # 基于文件的同步清单管理

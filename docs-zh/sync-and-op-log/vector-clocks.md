@@ -338,7 +338,8 @@ Step 2: Client B has been working offline
 
 | 概念                                       | 文件                                                                         |
 | ------------------------------------------ | ---------------------------------------------------------------------------- |
-| 核心算法（compare/merge/prune）            | `packages/shared-schema/src/vector-clock.ts`                                 |
+| 核心算法（compare/merge/prune）            | `packages/sync-core/src/vector-clock.ts`                                     |
+| 兼容性重导出（供现有 shared-schema 引用）  | `packages/shared-schema/src/vector-clock.ts`                                 |
 | 客户端封装（空值处理、日志、校验）         | `src/app/core/util/vector-clock.ts`                                          |
 | 全局时钟管理、实体前沿                     | `src/app/op-log/sync/vector-clock.service.ts`                                |
 | 操作捕获（不裁剪、原子时钟更新）           | `src/app/op-log/capture/operation-log.effects.ts`                            |
@@ -352,3 +353,28 @@ Step 2: Client B has been working offline
 | 服务端：冲突检测 + 比较后裁剪              | `packages/super-sync-server/src/sync/sync.service.ts`                        |
 | 服务端：DoS 上限（sanitize，不裁剪）       | `packages/super-sync-server/src/sync/services/validation.service.ts`         |
 | 服务端：下载优化中的快照时钟裁剪           | `packages/super-sync-server/src/sync/services/operation-download.service.ts` |
+
+---
+
+## 11. 历史与设计原理（为什么裁剪是现在这样）
+
+当前裁剪设计背后的决策过程（此前在独立研究文档中，现仅保留在 git 历史中）。任何要修改 `MAX_VECTOR_CLOCK_SIZE` 或裁剪顺序的人都需要了解的背景。
+
+### 先比较，再裁剪——以及证明这一点的 Bug
+
+**绝不要在使用向量时钟进行比较之前裁剪它。** 裁剪会移除信息：一个缺失的条目是有歧义的——到底是"从未知道这个客户端"还是"该条目被裁剪了"——因此预先裁剪会导致返回 CONCURRENT 而非 EQUAL/因果顺序。两个独立的事故确立了这一原则：
+
+- **Riak #613：** 比较前裁剪导致"sibling explosion"——对象累积了数百个永远无法解决的 sibling，因为裁剪后的时钟总是比较为 CONCURRENT。
+- **Super Productivity（2026 年 2 月）：** 当 `MAX = 10` 时，服务端先裁剪再比较导致了无限拒绝循环——客户端合并所有时钟 + 自己的 ID（11 个条目），服务端裁剪到 10，那个不共享的 key 强制 CONCURRENT，服务端拒绝，客户端重新合并，循环往复。
+
+两个系统的修复方案：先比较**完整未裁剪**的时钟，然后**仅在存储前**裁剪。这就是第 6 节和第 9 节中的不变量。
+
+### 为什么 MAX = 20（10 → 30 → 20 的演变）
+
+对 2026 年 2 月循环的原始防御是一个 4 层方案（受保护的客户端 ID、裁剪感知比较、`isLikelyPruningArtifact` 启发式、同客户端检查）——这是治标。根本原因是 `MAX = 10` 太小，使得裁剪频繁发生，并与 SYNC_IMPORT 产生不良交互。
+
+提交 `d70f18a94d` 将 MAX 从 10 提升到 30（后降至 20——20 条目的时钟约 333 字节，可忽略不计），并**移除了四层中的三层**。`isLikelyPruningArtifact` 被丢弃（已知误判，MAX=20 时不需要）。只有**同客户端检查**保留——始终数学上正确（单调计数器是确定性的），且与 MAX 无关。在 MAX=20 时，裁剪需要 **21+ 个不同的客户端 ID**，对个人生产力应用而言极为罕见，因此裁剪路径实际上处于休眠状态（参见第 5 节"裁剪很少见"）。
+
+### 未来方案（仅当服务端成为协调者时适用）
+
+在服务端权威模型中，时钟增长可以在不裁剪的情况下限制，通过 **Dotted Version Vectors**（绑定到服务端 vnodes 而非设备）、**有界可回收客户端 ID**（需要注册/退役协议）或**定期 stable-cut GC**（需要全量时钟上报）。这些都不适用于当前的 dumb-relay 模型。
