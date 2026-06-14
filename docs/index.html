@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0"
+    />
+    <title>Super Productivity — Docs</title>
+    <link
+      rel="stylesheet"
+      href="//cdn.jsdelivr.net/npm/docsify@4/lib/themes/vue.css"
+    />
+    <style>
+      /* 侧边栏 — 内部导航滚动，外层不滚动 */
+      .sidebar {
+        overflow: hidden !important;
+        display: flex !important;
+        flex-direction: column !important;
+      }
+      .sidebar-nav {
+        font-size: 15px;
+        line-height: 1.8;
+        overflow-y: auto;
+        flex: 1;
+        min-height: 0;
+      }
+      .sidebar-nav ul {
+        padding-left: 0;
+      }
+
+      /* 桌面端：用 padding-left 替代 left 做偏移，确保收起时内容能左移 */
+      @media screen and (min-width: 769px) {
+        .content {
+          left: 0 !important;
+          padding-left: 300px;
+          padding-right: 280px;
+          transition:
+            padding-left 0.25s ease,
+            transform 0.25s ease;
+        }
+        body.close .content {
+          padding-left: 120px !important;
+          transform: none !important;
+        }
+        body.close .sidebar {
+          transform: translateX(-300px) !important;
+        }
+        .markdown-section {
+          margin-right: 0;
+        }
+        body.close .markdown-section {
+          max-width: 1050px;
+        }
+      }
+
+      /* 可折叠分组标题 */
+      .sidebar-nav li > p {
+        cursor: pointer;
+        margin: 14px 0 6px 0;
+        padding: 8px 14px;
+        font-weight: 900;
+        font-size: 15px;
+        color: #1a1a2e;
+        background: #f0f2f5;
+        border-radius: 5px;
+        transition: background 0.2s;
+      }
+      .sidebar-nav li > p:hover {
+        background: #e0e3e8;
+      }
+      .sidebar-nav li > p::before {
+        content: '▾ ';
+        font-size: 11px;
+      }
+      .sidebar-nav li > p.collapsed::before {
+        content: '▸ ';
+      }
+      .sidebar-nav li > p.active-section {
+        color: #42b983;
+        background: #ecf8f2;
+      }
+      .sidebar-nav {
+        user-select: none;
+        cursor: default;
+      }
+      .sidebar-nav li {
+        cursor: pointer;
+      }
+      .sidebar-nav a {
+        cursor: pointer;
+      }
+
+      /* 子项链接 */
+      .sidebar-nav li li a {
+        display: block;
+        padding: 5px 14px 5px 22px;
+        color: #444;
+        font-weight: 700;
+        border-left: 2px solid transparent;
+        border-radius: 0 4px 4px 0;
+        transition: all 0.15s;
+        text-decoration: none;
+        font-size: 15px;
+      }
+      .sidebar-nav li li a:hover {
+        color: #1a1a2e;
+        background: #f0f3f7;
+        border-left-color: #bbb;
+      }
+
+      /* 当前激活页 */
+      .sidebar-nav li li a.active {
+        color: #42b983;
+        background: #ecf8f2;
+        border-left-color: #42b983;
+        font-weight: 800;
+      }
+
+      /* 滚动条 */
+      .sidebar-nav::-webkit-scrollbar {
+        width: 5px;
+      }
+      .sidebar-nav::-webkit-scrollbar-thumb {
+        background: #d0d5dd;
+        border-radius: 3px;
+      }
+
+      /* TOC 拖拽调节手柄 */
+      #toc-resize-handle {
+        position: fixed;
+        top: 0;
+        bottom: 0;
+        width: 8px;
+        cursor: col-resize;
+        z-index: 999;
+        background: transparent;
+        transition: background 0.2s;
+      }
+      #toc-resize-handle:hover,
+      #toc-resize-handle.dragging {
+        background: #42b983;
+      }
+
+      /* 内容区给右侧 TOC 留空 */
+      .markdown-section {
+        max-width: 720px;
+        margin-right: 280px;
+      }
+
+      /* 右侧 TOC */
+      #toc-panel {
+        position: fixed;
+        right: 0;
+        top: 0;
+        bottom: 0;
+        width: 240px;
+        overflow: hidden;
+        font-size: 13px;
+        line-height: 1.8;
+        border-left: 1px solid #eee;
+        background: #fff;
+        z-index: 10;
+      }
+      #toc-scroll {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        overflow-x: hidden;
+        overflow-y: scroll;
+        padding: 80px 20px 40px 16px;
+        word-break: break-word;
+        -webkit-overflow-scrolling: touch;
+      }
+      #toc-panel .toc-title {
+        font-weight: 900;
+        font-size: 14px;
+        color: #999;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 10px;
+        padding-left: 8px;
+      }
+      #toc-panel a {
+        display: block;
+        padding: 5px 8px;
+        color: #555;
+        text-decoration: none;
+        border-left: 2px solid transparent;
+        border-radius: 0 3px 3px 0;
+        transition: all 0.15s;
+        cursor: pointer;
+        overflow-wrap: break-word;
+        white-space: normal;
+      }
+      #toc-panel a:hover {
+        color: #1a1a2e;
+        background: #f0f3f7;
+      }
+      #toc-panel a.active {
+        color: #42b983;
+        background: #e8f5ed;
+        border-left-color: #42b983;
+        font-weight: 800;
+        border-radius: 0 4px 4px 0;
+      }
+      #toc-panel a.toc-h3 {
+        padding-left: 22px;
+      }
+      #toc-scroll::-webkit-scrollbar {
+        width: 4px;
+      }
+      #toc-scroll::-webkit-scrollbar-thumb {
+        background: #d0d5dd;
+        border-radius: 2px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">Loading docs...</div>
+    <div id="toc-panel">
+      <div id="toc-resize-handle"></div>
+      <div id="toc-scroll">
+        <div class="toc-title">On this page</div>
+        <nav id="toc-nav"></nav>
+      </div>
+    </div>
+    <script>
+      window.$docsify = {
+        plugins: [
+          function (hook, vm) {
+            hook.afterEach(function (html, next) {
+              var currentDir = (vm.route.path || '').replace(/\/[^/]*$/, '');
+              html = html.replace(/href="([^"]+)\.md"/g, function (match, p1) {
+                if (/^(https?:|\/\/)/.test(p1)) return match;
+                var raw = p1;
+                // resolve relative path
+                var dir = currentDir;
+                while (raw.startsWith('../')) {
+                  raw = raw.slice(3);
+                  dir = dir.replace(/\/[^/]*$/, '');
+                }
+                if (raw.startsWith('./')) raw = raw.slice(2);
+                var resolved = dir ? dir + '/' + raw : raw;
+                return 'href="#/' + resolved + '"';
+              });
+              next(html);
+            });
+            hook.doneEach(function () {
+              setTimeout(function () {
+                buildToc();
+                highlightActiveSection();
+              }, 200);
+            });
+            hook.ready(function () {
+              setTimeout(function () {
+                // 折叠所有分组（根目录文件不受影响，始终可见）
+                var toggles = document.querySelectorAll('.sidebar-nav li > p');
+                toggles.forEach(function (p) {
+                  if (!p.classList.contains('collapsed')) p.click();
+                });
+                addTocResize();
+              }, 400);
+            });
+          },
+        ],
+        name: 'Super Productivity Docs',
+        repo: 'https://github.com/johannesjo/super-productivity',
+        loadSidebar: '_sidebar.md',
+        subMaxLevel: 0,
+        auto2top: true,
+        search: 'auto',
+      };
+
+      function highlightActiveSection() {
+        var active = document.querySelector('.sidebar-nav a.active');
+        // remove all existing
+        document
+          .querySelectorAll('.sidebar-nav li > p.active-section')
+          .forEach(function (p) {
+            p.classList.remove('active-section');
+          });
+        if (!active) return;
+        // walk up from active link, highlight every ancestor section <p>
+        var el = active;
+        while (el) {
+          el = el.parentElement;
+          if (!el) break;
+          // if this <li> contains a <p>, highlight it
+          var p = el.querySelector(':scope > p');
+          if (p) p.classList.add('active-section');
+          // if we reached the top sidebar-nav <ul>, stop
+          if (el.classList.contains('sidebar-nav')) break;
+        }
+      }
+
+      function buildToc() {
+        var toc = document.getElementById('toc-nav');
+        var headings = document.querySelectorAll(
+          '.markdown-section h2, .markdown-section h3',
+        );
+        if (!headings.length) {
+          toc.innerHTML =
+            '<span style="color:#ccc;font-size:12px;padding-left:8px;">No headings</span>';
+          return;
+        }
+        var html = '';
+        headings.forEach(function (h) {
+          if (!h.id) return;
+          var cls = h.tagName === 'H3' ? 'toc-h3' : '';
+          html +=
+            '<a class="' + cls + '" data-target="' + h.id + '">' + h.textContent + '</a>';
+        });
+        toc.innerHTML = html;
+        toc.querySelectorAll('a').forEach(function (a) {
+          a.addEventListener('click', function (e) {
+            e.preventDefault();
+            var target = document.getElementById(a.dataset.target);
+            if (target) {
+              target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+          });
+        });
+      }
+
+      // 拦截 .md 链接转为 docsify hash 路由
+
+      // scroll spy — highlight the heading whose content is currently being read
+      var tocScrollTimer = null;
+      function updateActiveTocLink() {
+        var headings = document.querySelectorAll(
+          '.markdown-section h2[id], .markdown-section h3[id]',
+        );
+        var activeId = null;
+        var readLine = 120;
+        headings.forEach(function (h) {
+          if (h.getBoundingClientRect().top <= readLine) activeId = h.id;
+        });
+        document.querySelectorAll('#toc-nav a').forEach(function (a) {
+          a.classList.toggle('active', a.dataset.target === activeId);
+        });
+      }
+      document.addEventListener(
+        'scroll',
+        function () {
+          if (tocScrollTimer) return;
+          tocScrollTimer = setTimeout(function () {
+            tocScrollTimer = null;
+            updateActiveTocLink();
+          }, 80);
+        },
+        { passive: true },
+      );
+      window.__tocSpyBound = true;
+
+      function addTocResize() {
+        var toc = document.getElementById('toc-panel');
+        if (!toc) return;
+
+        var handle = document.getElementById('toc-resize-handle');
+        if (!handle) return;
+
+        function syncHandle() {
+          handle.style.left = window.innerWidth - toc.offsetWidth - 4 + 'px';
+        }
+        syncHandle();
+        window.addEventListener('resize', syncHandle);
+
+        var startX, startW;
+        handle.addEventListener('mousedown', function (e) {
+          e.preventDefault();
+          startX = e.clientX;
+          startW = toc.offsetWidth;
+          handle.classList.add('dragging');
+          document.body.style.userSelect = 'none';
+        });
+
+        document.addEventListener('mousemove', function (e) {
+          if (!handle.classList.contains('dragging')) return;
+          var diff = startX - e.clientX;
+          var newW = Math.max(200, Math.min(600, startW + diff));
+          toc.style.width = newW + 'px';
+          document.querySelector('.content').style.paddingRight = newW + 40 + 'px';
+          syncHandle();
+        });
+
+        document.addEventListener('mouseup', function () {
+          handle.classList.remove('dragging');
+          document.body.style.userSelect = '';
+        });
+      }
+    </script>
+    <script src="//cdn.jsdelivr.net/npm/docsify@4/lib/docsify.min.js"></script>
+    <script src="//cdn.jsdelivr.net/npm/docsify@4/lib/plugins/search.min.js"></script>
+    <script src="//cdn.jsdelivr.net/npm/docsify-sidebar-collapse/dist/docsify-sidebar-collapse.min.js"></script>
+  </body>
+</html>
