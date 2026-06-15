@@ -364,36 +364,67 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
     }
   }
 
+  /**
+   * Builds a StoredOperationLogEntry (minus auto-incremented seq) from an
+   * Operation, encoding it to compact format.
+   */
+  private _buildStoredEntry(
+    op: Operation,
+    source: 'local' | 'remote',
+    options?: { pendingApply?: boolean },
+  ): Omit<StoredOperationLogEntry, 'seq'> {
+    return {
+      op: encodeOperation(op),
+      appliedAt: Date.now(),
+      source,
+      syncedAt: source === 'remote' ? Date.now() : undefined,
+      applicationStatus:
+        source === 'remote' ? (options?.pendingApply ? 'pending' : 'applied') : undefined,
+    };
+  }
+
+  /**
+   * Invalidates all caches except vector clock cache. Called after bulk
+   * mutations that affect the entire ops store.
+   */
+  private _invalidateAppliedAndUnsyncedCaches(): void {
+    this._appliedOpIdsCache = null;
+    this._cacheLastSeq = 0;
+    this._invalidateUnsyncedCache();
+  }
+
+  /**
+   * Handles errors from append-family operations. Converts IndexedDB
+   * DOMException errors into application-specific errors:
+   * - ConstraintError → DUPLICATE_OPERATION_ERROR_MSG (also invalidates caches)
+   * - QuotaExceededError → StorageQuotaExceededError
+   * - Other errors are re-thrown as-is.
+   */
+  private _handleAppendError(e: unknown): never {
+    if (e instanceof DOMException && e.name === 'ConstraintError') {
+      this._appliedOpIdsCache = null;
+      this._cacheLastSeq = 0;
+      throw new Error(DUPLICATE_OPERATION_ERROR_MSG);
+    }
+    if (e instanceof DOMException && e.name === 'QuotaExceededError') {
+      throw new StorageQuotaExceededError();
+    }
+    throw e;
+  }
+
   async append(
     op: Operation,
     source: 'local' | 'remote' = 'local',
     options?: { pendingApply?: boolean },
   ): Promise<number> {
     await this._ensureInit();
-    // Encode operation to compact format for storage efficiency
-    const compactOp = encodeOperation(op);
-    const entry: Omit<StoredOperationLogEntry, 'seq'> = {
-      op: compactOp,
-      appliedAt: Date.now(),
-      source,
-      syncedAt: source === 'remote' ? Date.now() : undefined,
-      // For remote ops, track application status for crash recovery
-      applicationStatus:
-        source === 'remote' ? (options?.pendingApply ? 'pending' : 'applied') : undefined,
-    };
-    // seq is auto-incremented, returned for later reference
     try {
-      return await this._adapter.add(STORE_NAMES.OPS, entry);
+      return await this._adapter.add(
+        STORE_NAMES.OPS,
+        this._buildStoredEntry(op, source, options),
+      );
     } catch (e) {
-      if (e instanceof DOMException && e.name === 'ConstraintError') {
-        this._appliedOpIdsCache = null;
-        this._cacheLastSeq = 0;
-        throw new Error(DUPLICATE_OPERATION_ERROR_MSG);
-      }
-      if (e instanceof DOMException && e.name === 'QuotaExceededError') {
-        throw new StorageQuotaExceededError();
-      }
-      throw e;
+      this._handleAppendError(e);
     }
   }
 
@@ -410,39 +441,17 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
         async (tx) => {
           const seqs: number[] = [];
           for (const op of ops) {
-            // Encode operation to compact format for storage efficiency
-            const compactOp = encodeOperation(op);
-            const entry: Omit<StoredOperationLogEntry, 'seq'> = {
-              op: compactOp,
-              appliedAt: Date.now(),
-              source,
-              syncedAt: source === 'remote' ? Date.now() : undefined,
-              applicationStatus:
-                source === 'remote'
-                  ? options?.pendingApply
-                    ? 'pending'
-                    : 'applied'
-                  : undefined,
-            };
-            const seq = await tx.add(STORE_NAMES.OPS, entry);
+            const seq = await tx.add(
+              STORE_NAMES.OPS,
+              this._buildStoredEntry(op, source, options),
+            );
             seqs.push(seq);
           }
           return seqs;
         },
       );
     } catch (e) {
-      // Cache is stale if we hit a constraint error - invalidate to force refresh
-      // This handles the case where a previous sync partially wrote ops before failing,
-      // leaving the cache out of sync with IndexedDB. See issue #6213.
-      if (e instanceof DOMException && e.name === 'ConstraintError') {
-        this._appliedOpIdsCache = null;
-        this._cacheLastSeq = 0;
-        throw new Error(DUPLICATE_OPERATION_ERROR_MSG);
-      }
-      if (e instanceof DOMException && e.name === 'QuotaExceededError') {
-        throw new StorageQuotaExceededError();
-      }
-      throw e;
+      this._handleAppendError(e);
     }
   }
 
@@ -488,20 +497,10 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
             continue;
           }
 
-          const compactOp = encodeOperation(op);
-          const entry: Omit<StoredOperationLogEntry, 'seq'> = {
-            op: compactOp,
-            appliedAt: Date.now(),
-            source,
-            syncedAt: source === 'remote' ? Date.now() : undefined,
-            applicationStatus:
-              source === 'remote'
-                ? options?.pendingApply
-                  ? 'pending'
-                  : 'applied'
-                : undefined,
-          };
-          const seq = await tx.add(STORE_NAMES.OPS, entry);
+          const seq = await tx.add(
+            STORE_NAMES.OPS,
+            this._buildStoredEntry(op, source, options),
+          );
           seqs.push(seq);
           writtenOps.push(op);
         }
@@ -986,9 +985,7 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
 
     // Invalidate caches if any ops were deleted to prevent stale data
     if (deletedCount > 0) {
-      this._appliedOpIdsCache = null;
-      this._cacheLastSeq = 0;
-      this._invalidateUnsyncedCache();
+      this._invalidateAppliedAndUnsyncedCaches();
     }
   }
 
@@ -1246,11 +1243,7 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
         await tx.clear(store);
       }
     });
-    // Invalidate all caches
-    this._appliedOpIdsCache = null;
-    this._cacheLastSeq = 0;
-    this._unsyncedCache = null;
-    this._unsyncedCacheLastSeq = 0;
+    this._invalidateAppliedAndUnsyncedCaches();
     this._vectorClockCache = null;
   }
 
@@ -1315,10 +1308,7 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
   async clearAllOperations(): Promise<void> {
     await this._ensureInit();
     await this._adapter.clear(STORE_NAMES.OPS);
-    // Invalidate caches since we cleared all ops
-    this._appliedOpIdsCache = null;
-    this._cacheLastSeq = 0;
-    this._invalidateUnsyncedCache();
+    this._invalidateAppliedAndUnsyncedCaches();
   }
 
   // ============================================================
@@ -1558,20 +1548,10 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
         'readwrite',
         async (tx) => {
           // 1. Append operation to ops store (encoded to compact format)
-          const compactOp = encodeOperation(op);
-          const entry: Omit<StoredOperationLogEntry, 'seq'> = {
-            op: compactOp,
-            appliedAt: Date.now(),
-            source,
-            syncedAt: source === 'remote' ? Date.now() : undefined,
-            applicationStatus:
-              source === 'remote'
-                ? options?.pendingApply
-                  ? 'pending'
-                  : 'applied'
-                : undefined,
-          };
-          const seq = await tx.add(STORE_NAMES.OPS, entry);
+          const seq = await tx.add(
+            STORE_NAMES.OPS,
+            this._buildStoredEntry(op, source, options),
+          );
 
           // 2. Update vector clock to match the operation's clock (only for
           // local ops). The op.vectorClock already contains the incremented
@@ -1590,15 +1570,7 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
         },
       );
     } catch (e) {
-      if (e instanceof DOMException && e.name === 'ConstraintError') {
-        this._appliedOpIdsCache = null;
-        this._cacheLastSeq = 0;
-        throw new Error(DUPLICATE_OPERATION_ERROR_MSG);
-      }
-      if (e instanceof DOMException && e.name === 'QuotaExceededError') {
-        throw new StorageQuotaExceededError();
-      }
-      throw e;
+      this._handleAppendError(e);
     }
   }
 
@@ -1635,7 +1607,6 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
     const newState = syncImportOp.payload;
     const newVectorClock = syncImportOp.vectorClock;
     const compactedAt = Date.now();
-    const compactOp = encodeOperation(syncImportOp);
     const storeNames: OpLogStoreName[] = [
       STORE_NAMES.OPS,
       STORE_NAMES.STATE_CACHE,
@@ -1667,14 +1638,10 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
 
         await tx.clear(STORE_NAMES.OPS);
 
-        const entry: Omit<StoredOperationLogEntry, 'seq'> = {
-          op: compactOp,
-          appliedAt: Date.now(),
-          source: 'local',
-          syncedAt: undefined,
-          applicationStatus: undefined,
-        };
-        const seq = await tx.add(STORE_NAMES.OPS, entry);
+        const seq = await tx.add(
+          STORE_NAMES.OPS,
+          this._buildStoredEntry(syncImportOp, 'local'),
+        );
 
         await tx.put(
           STORE_NAMES.VECTOR_CLOCK,
@@ -1710,9 +1677,7 @@ export class OperationLogStoreService implements RemoteOperationApplyStorePort<O
       });
 
       // Reached only on a committed transaction.
-      this._appliedOpIdsCache = null;
-      this._cacheLastSeq = 0;
-      this._invalidateUnsyncedCache();
+      this._invalidateAppliedAndUnsyncedCaches();
       this._vectorClockCache = newVectorClock;
       // The clientId rotated atomically with the stores above. Invalidate the
       // ClientIdService cache so the next read sees the rotated value. On
