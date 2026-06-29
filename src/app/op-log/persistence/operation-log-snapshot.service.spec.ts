@@ -11,6 +11,7 @@ import { StateSnapshotService } from '../backup/state-snapshot.service';
 import { CLIENT_ID_PROVIDER, ClientIdProvider } from '../util/client-id.provider';
 import { MAX_VECTOR_CLOCK_SIZE } from '@sp/shared-schema';
 import { ValidateStateService } from '../validation/validate-state.service';
+import { OperationWriteFlushService } from '../sync/operation-write-flush.service';
 
 // Meaningful state (contains a task) so saveCurrentStateAsSnapshot proceeds past
 // the empty-state guard (#7892). Tests that care only about clock pruning /
@@ -28,6 +29,7 @@ describe('OperationLogSnapshotService', () => {
   let mockSchemaMigrationService: jasmine.SpyObj<SchemaMigrationService>;
   let mockClientIdProvider: jasmine.SpyObj<ClientIdProvider>;
   let mockValidateStateService: jasmine.SpyObj<ValidateStateService>;
+  let mockWriteFlushService: jasmine.SpyObj<OperationWriteFlushService>;
 
   beforeEach(() => {
     mockOpLogStore = jasmine.createSpyObj('OperationLogStoreService', [
@@ -55,6 +57,10 @@ describe('OperationLogSnapshotService', () => {
       isValid: true,
       typiaErrors: [],
     });
+    mockWriteFlushService = jasmine.createSpyObj('OperationWriteFlushService', [
+      'flushPendingWrites',
+    ]);
+    mockWriteFlushService.flushPendingWrites.and.resolveTo(undefined);
 
     TestBed.configureTestingModule({
       providers: [
@@ -65,6 +71,7 @@ describe('OperationLogSnapshotService', () => {
         { provide: SchemaMigrationService, useValue: mockSchemaMigrationService },
         { provide: CLIENT_ID_PROVIDER, useValue: mockClientIdProvider },
         { provide: ValidateStateService, useValue: mockValidateStateService },
+        { provide: OperationWriteFlushService, useValue: mockWriteFlushService },
       ],
     });
     service = TestBed.inject(OperationLogSnapshotService);
@@ -315,6 +322,62 @@ describe('OperationLogSnapshotService', () => {
       const savedCache = mockOpLogStore.saveStateCache.calls.mostRecent().args[0];
       expect(savedCache.compactedAt).toBeGreaterThanOrEqual(beforeTime);
       expect(savedCache.compactedAt).toBeLessThanOrEqual(afterTime);
+    });
+
+    // #8469: Regression — flush pending writes before reading state/lastSeq
+    // to prevent snapshot from capturing state ahead of lastSeq.
+    it('should flush pending writes before reading state and lastSeq (#8469)', async () => {
+      // Simulate: an op is in-flight (reducer ran, NgRx state changed,
+      // but op not yet written to IndexedDB). After flush, lastSeq advances.
+      const callOrder: string[] = [];
+
+      mockWriteFlushService.flushPendingWrites.and.callFake(async () => {
+        callOrder.push('flushPendingWrites');
+        // Simulate: after flush, the in-flight op's seq is now in IndexedDB
+        mockOpLogStore.getLastSeq.and.resolveTo(11);
+      });
+      mockStateSnapshotService.getStateSnapshot.and.callFake(() => {
+        callOrder.push('getStateSnapshot');
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        const timeSpentOnDay = { '2026-06-23': 1800000 };
+        return {
+          task: {
+            ids: ['t1'],
+            entities: { t1: { id: 't1', timeSpentOnDay } },
+          },
+          project: { ids: [] },
+          globalConfig: {},
+        } as any;
+      });
+      mockOpLogStore.getLastSeq.and.resolveTo(10); // initial: before flush
+      mockVectorClockService.getCurrentVectorClock.and.resolveTo({ client1: 10 });
+      mockOpLogStore.saveStateCache.and.resolveTo(undefined);
+
+      await service.saveCurrentStateAsSnapshot();
+
+      // Verify flush happens BEFORE state/lastSeq reads
+      expect(callOrder[0]).toBe('flushPendingWrites');
+      expect(mockWriteFlushService.flushPendingWrites).toHaveBeenCalledTimes(1);
+
+      // Verify snapshot uses the post-flush lastSeq (11, not 10)
+      const savedCache = mockOpLogStore.saveStateCache.calls.mostRecent().args[0];
+      expect(savedCache.lastAppliedOpSeq).toBe(11);
+    });
+
+    it('should still save snapshot when flush finds no pending writes', async () => {
+      mockWriteFlushService.flushPendingWrites.and.resolveTo(undefined);
+      mockStateSnapshotService.getStateSnapshot.and.returnValue(
+        MEANINGFUL_SNAPSHOT_STATE as any,
+      );
+      mockVectorClockService.getCurrentVectorClock.and.resolveTo({ client1: 1 });
+      mockOpLogStore.getLastSeq.and.resolveTo(5);
+      mockOpLogStore.saveStateCache.and.resolveTo(undefined);
+
+      await service.saveCurrentStateAsSnapshot();
+
+      expect(mockWriteFlushService.flushPendingWrites).toHaveBeenCalledTimes(1);
+      const savedCache = mockOpLogStore.saveStateCache.calls.mostRecent().args[0];
+      expect(savedCache.lastAppliedOpSeq).toBe(5);
     });
   });
 

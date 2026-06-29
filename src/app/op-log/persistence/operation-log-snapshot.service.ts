@@ -13,6 +13,7 @@ import { CLIENT_ID_PROVIDER, ClientIdProvider } from '../util/client-id.provider
 import { limitVectorClockSize } from '../../core/util/vector-clock';
 import { ValidateStateService } from '../validation/validate-state.service';
 import { hasMeaningfulStateData } from '../validation/has-meaningful-state-data.util';
+import { OperationWriteFlushService } from '../sync/operation-write-flush.service';
 
 type StateCache = MigratableStateCache;
 
@@ -35,6 +36,7 @@ export class OperationLogSnapshotService {
   private schemaMigrationService = inject(SchemaMigrationService);
   private validateStateService = inject(ValidateStateService);
   private clientIdProvider: ClientIdProvider = inject(CLIENT_ID_PROVIDER);
+  private writeFlushService = inject(OperationWriteFlushService);
 
   /**
    * Validates that a snapshot has the expected structure and data.
@@ -81,6 +83,12 @@ export class OperationLogSnapshotService {
    */
   async saveCurrentStateAsSnapshot(): Promise<void> {
     try {
+      // #8469: Drain pending writes so every dispatched-but-unsequenced op has
+      // its seq assigned before we read lastSeq. Without this, a reducer that
+      // ran synchronously at dispatch can leave NgRx state ahead of lastSeq,
+      // causing the next boot's tail replay to double-apply the op.
+      await this.writeFlushService.flushPendingWrites();
+
       // Get current state from NgRx
       const currentState = this.stateSnapshotService.getStateSnapshot();
 
